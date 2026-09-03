@@ -1,3 +1,4 @@
+// Unit tests for Il2CppDumper
 using Il2CppDumper.Core.Containers;
 using Il2CppDumper.Core.Exporters;
 using Il2CppDumper.Core.Model;
