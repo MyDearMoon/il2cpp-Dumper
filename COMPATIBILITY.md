@@ -72,3 +72,4 @@ $fs.Close()
 - **`AF-1B-B1-FA`**: Standard unencrypted metadata. Ready for static dump.
 - **`4D-48-59-00`**: HoYoverse encrypted (`MHY\0`). Requires memory dump.
 - **Anything else**: Custom packed or encrypted. Requires memory dump.
+
