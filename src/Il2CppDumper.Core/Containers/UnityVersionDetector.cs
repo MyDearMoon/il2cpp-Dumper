@@ -8,11 +8,11 @@ namespace Il2CppDumper.Core.Containers;
 
 public static class UnityVersionDetector
 {
-    private static readonly Regex VersionRegex = new(@"\b(20\d\d\.\d+\.\d+[a-z0-9]*)\b", RegexOptions.Compiled);
+    private static readonly Regex VersionRegex = new(@"\b(20\d\d\.\d+\.\d+[a-z0-9]*|6000\.\d+\.\d+[a-z0-9]*)\b", RegexOptions.Compiled);
+    private static readonly Regex PlistVersionRegex = new(@"<key>UnityVersion</key>\s*<string>([^<]+)</string>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static UnityVersion Detect(string? gameDirectory, string? binaryPath, string? metadataPath, Action<string>? logger = null)
     {
-        // 1. Check UnityPlayer.dll / UnityPlayer.so
         var searchDirs = new List<string>();
         if (!string.IsNullOrEmpty(gameDirectory) && Directory.Exists(gameDirectory)) searchDirs.Add(gameDirectory);
         if (!string.IsNullOrEmpty(binaryPath))
@@ -23,6 +23,7 @@ public static class UnityVersionDetector
             if (!string.IsNullOrEmpty(parentDir) && !searchDirs.Contains(parentDir)) searchDirs.Add(parentDir);
         }
 
+        // 1. Check UnityPlayer.dll (Windows)
         foreach (var dir in searchDirs)
         {
             var playerDll = Path.Combine(dir, "UnityPlayer.dll");
@@ -37,14 +38,66 @@ public static class UnityVersionDetector
                         return ver;
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Ignore
+                    logger?.Invoke($"[Debug] Error reading UnityPlayer.dll version: {ex.Message}");
                 }
             }
         }
 
-        // 2. Check globalgamemanagers or data.unity3d
+        // 2. Check libunity.so / UnityPlayer.so (Android / Linux)
+        foreach (var dir in searchDirs)
+        {
+            foreach (var soName in new[] { "libunity.so", "UnityPlayer.so" })
+            {
+                var soFiles = Directory.GetFiles(dir, soName, SearchOption.AllDirectories);
+                foreach (var soFile in soFiles)
+                {
+                    try
+                    {
+                        using var fs = File.OpenRead(soFile);
+                        var buffer = new byte[Math.Min(fs.Length, 128 * 1024)];
+                        fs.ReadExactly(buffer, 0, buffer.Length);
+                        var text = Encoding.ASCII.GetString(buffer);
+                        var match = VersionRegex.Match(text);
+                        if (match.Success && TryParseVersion(match.Value, out var ver))
+                        {
+                            logger?.Invoke($"Detected Unity version from {soName}: {ver}");
+                            return ver;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        logger?.Invoke($"[Debug] Error reading {soName}: {ex.Message}");
+                    }
+                }
+            }
+        }
+
+        // 3. Check Info.plist (macOS / iOS)
+        foreach (var dir in searchDirs)
+        {
+            var plistFiles = Directory.GetFiles(dir, "Info.plist", SearchOption.AllDirectories);
+            foreach (var plist in plistFiles)
+            {
+                try
+                {
+                    var content = File.ReadAllText(plist);
+                    var match = PlistVersionRegex.Match(content);
+                    if (match.Success && TryParseVersion(match.Groups[1].Value, out var ver))
+                    {
+                        logger?.Invoke($"Detected Unity version from Info.plist: {ver}");
+                        return ver;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger?.Invoke($"[Debug] Error reading Info.plist: {ex.Message}");
+                }
+            }
+        }
+
+        // 4. Check globalgamemanagers / data.unity3d
         foreach (var dir in searchDirs)
         {
             var dataDirs = Directory.GetDirectories(dir, "*_Data", SearchOption.AllDirectories);
@@ -72,9 +125,9 @@ public static class UnityVersionDetector
                             return parsed;
                         }
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // Ignore
+                        logger?.Invoke($"[Debug] Error reading globalgamemanagers: {ex.Message}");
                     }
                 }
             }
@@ -90,7 +143,7 @@ public static class UnityVersionDetector
             var clean = VersionRegex.Match(input);
             var str = clean.Success ? clean.Value : input.Trim();
 
-            // Strip trailing letter/numbers like f1, b2
+            // Strip trailing letter/numbers like f1, b2, a0
             var parts = str.Split('.');
             if (parts.Length >= 3)
             {
@@ -107,7 +160,7 @@ public static class UnityVersionDetector
         }
         catch
         {
-            // Ignore
+            // Parse failure
         }
 
         version = default;

@@ -60,7 +60,38 @@ public class ExporterTests
         method.Parameters.Add(new ParameterModel { Name = "amount", TypeName = "System.Int32" });
         playerType.Methods.Add(method);
 
+        var getterMethod = new MethodModel
+        {
+            Name = "get_Health",
+            ReturnType = "System.Int32",
+            IsPublic = true
+        };
+        playerType.Methods.Add(getterMethod);
+
+        playerType.Properties.Add(new PropertyModel
+        {
+            Name = "Health",
+            TypeName = "System.Int32",
+            Getter = getterMethod
+        });
+
+        var structType = new TypeModel
+        {
+            ImageName = "Assembly-CSharp.dll",
+            Namespace = "Game.Gameplay",
+            Name = "PlayerStats",
+            IsValueType = true,
+            IsPublic = true
+        };
+        structType.Fields.Add(new FieldModel
+        {
+            Name = "level",
+            TypeName = "System.Int32",
+            Offset = 0x0
+        });
+
         img.Types.Add(playerType);
+        img.Types.Add(structType);
         ctx.Images.Add(img);
         return ctx;
     }
@@ -143,6 +174,24 @@ public class ExporterTests
             Assert.NotNull(method);
             Assert.Single(method.Parameters);
             Assert.Equal("amount", method.Parameters[0].Name);
+            Assert.Equal("System.Int32", method.Parameters[0].ParameterType.FullName);
+            Assert.Equal("System.Void", method.ReturnType.FullName);
+
+            var field = type.Fields.FirstOrDefault(f => f.Name == "health");
+            Assert.NotNull(field);
+            Assert.Equal("System.Int32", field.FieldType.FullName);
+
+            // Assert property
+            var prop = type.Properties.FirstOrDefault(p => p.Name == "Health");
+            Assert.NotNull(prop);
+            Assert.Equal("System.Int32", prop.PropertyType.FullName);
+            Assert.NotNull(prop.GetMethod);
+            Assert.Equal("get_Health", prop.GetMethod.Name);
+
+            // Assert value type struct
+            var structDef = assembly.MainModule.Types.FirstOrDefault(t => t.Name == "PlayerStats");
+            Assert.NotNull(structDef);
+            Assert.Equal("System.ValueType", structDef.BaseType.FullName);
         }
         finally
         {
@@ -169,6 +218,11 @@ public class ExporterTests
             Assert.True(File.Exists(dllMainPath));
 
             var header = File.ReadAllText(headerPath);
+            Assert.Contains("struct Il2CppObject", header);
+            Assert.Contains("struct Game_Gameplay_PlayerController : public Il2CppObject {", header);
+            Assert.Contains("uint8_t _pad_0x10[0x8];", header);
+            Assert.Contains("int32_t health; // Offset: 0x18", header);
+            Assert.Contains("struct Game_Gameplay_PlayerStats {", header);
             Assert.Contains("PlayerController", header);
             Assert.Contains("TakeDamage", header);
         }

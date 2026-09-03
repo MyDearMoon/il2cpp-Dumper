@@ -93,7 +93,7 @@ public static class DumpModelBuilder
             ImageName = imageName,
             Namespace = typeDef.Namespace ?? string.Empty,
             Name = typeDef.Name ?? $"Type_{typeDefIndex}",
-            TypeDefIndex = typeDefIndex,
+            TypeDefIndex = typeDef.TypeIndex.IsNonNull ? typeDef.TypeIndex.Value : typeDefIndex,
             IsValueType = typeDef.IsValueType,
             IsEnum = typeDef.IsEnumType,
             IsInterface = typeDef.IsInterface,
