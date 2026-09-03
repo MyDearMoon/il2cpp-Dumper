@@ -32,8 +32,7 @@ public static class Program
             new FigletText("Il2CppDumper")
                 .Color(Color.Cyan1));
 
-        AnsiConsole.MarkupLine("[bold cyan]IL2CPP-DUMPER (ALL-IN-ONE TOOLKIT)[/] [bold grey]- v1.0.0[/]");
-        AnsiConsole.MarkupLine("[grey]Unified Unity Reverse Engineering Suite: Static Dump, CIL Stubs, C++ SDK & Memory Bypass[/]");
+        AnsiConsole.MarkupLine("[bold cyan]Il2CppDumper[/] [bold grey]v1.0.0[/]");
         AnsiConsole.WriteLine();
     }
 

@@ -1,13 +1,13 @@
-# Il2Cpp-Dumper (All-in-One Toolkit)
+# Il2CppDumper
 
-A modern, high-performance, all-in-one reverse engineering and modding toolkit for Unity IL2CPP applications across **Android**, **iOS**, and **PC (Windows/Linux/macOS)**.
+Unity IL2CPP extraction and reverse engineering tool for Windows, Android, and iOS.
 
-This project unifies the best capabilities of the fragmented IL2CPP tooling ecosystem into a single .NET 9 pipeline:
-- **[Perfare/Il2CppDumper](https://github.com/Perfare/Il2CppDumper)**: Metadata restoration, `dump.cs`, symbol maps, and disassembler scripts (IDA Pro, Ghidra, Binary Ninja).
-- **[SamboyCoding/Cpp2IL](https://github.com/SamboyCoding/Cpp2IL)**: Native binary analysis & decompilable dummy assembly generation.
-- **[djkaty/Il2CppInspector](https://github.com/djkaty/Il2CppInspector)**: C++ modding SDK generation (`il2cpp.h`, `il2cpp-init.h`, and Visual Studio hooking scaffolding).
-- **Runtime Memory Dumpers ([Zygisk-Il2CppDumper](https://github.com/Perfare/Zygisk-Il2CppDumper) & [frida-il2cpp-bridge](https://github.com/vfsfitvnm/frida-il2cpp-bridge))**: In-memory decryption bypass for games protected with anti-tamper or custom packers.
-- **Automated Container Ingestion**: Drag-and-drop `.apk`, `.xapk`, `.apkm`, `.ipa`, or game directory with automatic ABI selection (`arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`).
+Supports:
+- Dumping `dump.cs` with field offsets, method RVAs, and signatures.
+- Rebuilding typed dummy assemblies (`DummyDll/*.dll`) via Mono.Cecil for dnSpy, ILSpy, and BepInEx modding.
+- Generating C++ SDK headers (`il2cpp.h`) with byte-accurate struct layouts.
+- Auto-restoration scripts for IDA Pro, Ghidra, and Binary Ninja.
+- Container ingestion (.apk, .xapk, .apkm, .ipa, zip, game directory).
 
 ---
 
