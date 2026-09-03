@@ -16,14 +16,28 @@ public sealed class DummyAssemblyExporter : IExporter
         Directory.CreateDirectory(dummyDir);
         logger?.Invoke($"Exporting dummy assemblies to: {dummyDir}...");
 
+        // Build global type-to-assembly index across ALL images upfront
+        // This ensures cross-assembly references (e.g. Assembly-CSharp -> UnityEngine.CoreModule)
+        // resolve to the correct AssemblyNameReference rather than falling back to CoreLibrary.
+        var globalTypeMap = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var img in context.Images)
+        {
+            var cleanAsmName = CleanAssemblyName(img.Name);
+            foreach (var type in img.Types)
+            {
+                if (!string.IsNullOrEmpty(type.FullName))
+                {
+                    globalTypeMap[type.FullName] = cleanAsmName;
+                }
+            }
+        }
+
         var exportedCount = 0;
         foreach (var img in context.Images)
         {
             try
             {
-                var cleanName = img.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
-                    ? img.Name[..^4]
-                    : img.Name;
+                var cleanName = CleanAssemblyName(img.Name);
 
                 var assembly = AssemblyDefinition.CreateAssembly(
                     new AssemblyNameDefinition(cleanName, new Version(1, 0, 0, 0)),
@@ -33,7 +47,7 @@ public sealed class DummyAssemblyExporter : IExporter
                 var module = assembly.MainModule;
                 var localTypes = new Dictionary<string, TypeDefinition>(StringComparer.Ordinal);
 
-                // Pass 1: Declare all type skeletons so they can be referenced
+                // Pass 1: Declare all type skeletons in this assembly
                 var typePairs = new List<(TypeModel Model, TypeDefinition Def)>();
                 foreach (var typeModel in img.Types)
                 {
@@ -70,9 +84,9 @@ public sealed class DummyAssemblyExporter : IExporter
                     }
                 }
 
-                var resolver = new CecilTypeResolver(module, localTypes);
+                var resolver = new CecilTypeResolver(module, localTypes, globalTypeMap, cleanName);
 
-                // Pass 2: Set base types, interfaces, fields, methods, and properties
+                // Pass 2: Populate base types, interfaces, fields, methods, and properties
                 foreach (var (typeModel, typeDef) in typePairs)
                 {
                     try
@@ -109,6 +123,17 @@ public sealed class DummyAssemblyExporter : IExporter
                             }
                         }
 
+                        // Enum backing field: CLR enums require an instance field named "value__"
+                        if (typeModel.IsEnum && !typeModel.Fields.Any(f => f.Name == "value__"))
+                        {
+                            var underlyingType = resolver.Resolve("System.Int32");
+                            var valueField = new FieldDefinition(
+                                "value__",
+                                FieldAttributes.Public | FieldAttributes.SpecialName | FieldAttributes.RTSpecialName,
+                                underlyingType);
+                            typeDef.Fields.Add(valueField);
+                        }
+
                         // Fields
                         foreach (var field in typeModel.Fields)
                         {
@@ -120,6 +145,7 @@ public sealed class DummyAssemblyExporter : IExporter
                                 else fieldAttrs |= FieldAttributes.Assembly;
 
                                 if (field.IsStatic) fieldAttrs |= FieldAttributes.Static;
+                                if (field.IsConst) fieldAttrs |= FieldAttributes.Literal | FieldAttributes.HasDefault;
 
                                 var fieldType = resolver.Resolve(field.TypeName);
                                 var fDef = new FieldDefinition(SanitizeName(field.Name), fieldAttrs, fieldType);
@@ -127,7 +153,6 @@ public sealed class DummyAssemblyExporter : IExporter
                             }
                             catch
                             {
-                                // Fallback to object if field type resolution fails
                                 var fDef = new FieldDefinition(SanitizeName(field.Name), FieldAttributes.Public, module.TypeSystem.Object);
                                 typeDef.Fields.Add(fDef);
                             }
@@ -139,7 +164,9 @@ public sealed class DummyAssemblyExporter : IExporter
                         {
                             try
                             {
+                                var isConstructor = method.Name is ".ctor" or ".cctor";
                                 var methodAttrs = MethodAttributes.HideBySig;
+
                                 if (method.IsPublic) methodAttrs |= MethodAttributes.Public;
                                 else if (method.IsPrivate) methodAttrs |= MethodAttributes.Private;
                                 else methodAttrs |= MethodAttributes.Assembly;
@@ -148,8 +175,15 @@ public sealed class DummyAssemblyExporter : IExporter
                                 if (method.IsVirtual) methodAttrs |= MethodAttributes.Virtual | MethodAttributes.NewSlot;
                                 if (method.IsAbstract) methodAttrs |= MethodAttributes.Abstract;
 
-                                var returnType = resolver.Resolve(method.ReturnType);
-                                var mDef = new MethodDefinition(SanitizeName(method.Name), methodAttrs, returnType);
+                                // Constructors must preserve their exact name and have SpecialName | RTSpecialName
+                                if (isConstructor)
+                                {
+                                    methodAttrs |= MethodAttributes.SpecialName | MethodAttributes.RTSpecialName;
+                                }
+
+                                var methodName = isConstructor ? method.Name : SanitizeName(method.Name);
+                                var returnType = isConstructor ? module.TypeSystem.Void : resolver.Resolve(method.ReturnType);
+                                var mDef = new MethodDefinition(methodName, methodAttrs, returnType);
 
                                 foreach (var param in method.Parameters)
                                 {
@@ -220,9 +254,21 @@ public sealed class DummyAssemblyExporter : IExporter
         logger?.Invoke($"Successfully generated {exportedCount} dummy DLL assemblies in {dummyDir}");
     }
 
+    private static string CleanAssemblyName(string imgName)
+    {
+        return imgName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+            ? imgName[..^4]
+            : imgName;
+    }
+
     private static string SanitizeName(string name)
     {
         if (string.IsNullOrEmpty(name)) return "_unnamed";
+
+        // Explicitly preserve CLI constructor names
+        if (name is ".ctor" or ".cctor")
+            return name;
+
         return name
             .Replace('<', '_')
             .Replace('>', '_')
@@ -235,18 +281,33 @@ public sealed class DummyAssemblyExporter : IExporter
 }
 
 /// <summary>
-/// Resolves type names into valid Mono.Cecil TypeReferences, handling primitives, arrays, pointers, and external types.
+/// Resolves type names into valid Mono.Cecil TypeReferences, correctly scoping cross-assembly types.
 /// </summary>
 internal sealed class CecilTypeResolver
 {
     private readonly ModuleDefinition _module;
     private readonly Dictionary<string, TypeDefinition> _localTypes;
+    private readonly Dictionary<string, string> _globalTypeMap;
+    private readonly string _currentAssemblyName;
+    private readonly Dictionary<string, AssemblyNameReference> _asmRefs = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TypeReference> _cache = new(StringComparer.Ordinal);
 
-    public CecilTypeResolver(ModuleDefinition module, Dictionary<string, TypeDefinition> localTypes)
+    public CecilTypeResolver(
+        ModuleDefinition module,
+        Dictionary<string, TypeDefinition> localTypes,
+        Dictionary<string, string> globalTypeMap,
+        string currentAssemblyName)
     {
         _module = module;
         _localTypes = localTypes;
+        _globalTypeMap = globalTypeMap;
+        _currentAssemblyName = currentAssemblyName;
+
+        // Populate existing assembly references
+        foreach (var r in _module.AssemblyReferences)
+        {
+            _asmRefs[r.Name] = r;
+        }
     }
 
     public TypeReference Resolve(string? rawTypeName)
@@ -256,11 +317,10 @@ internal sealed class CecilTypeResolver
 
         var typeName = rawTypeName.Trim();
 
-        // Check cache
         if (_cache.TryGetValue(typeName, out var cached))
             return cached;
 
-        // Arrays: e.g. "System.Int32[]" or "Player[]"
+        // Arrays: e.g. "System.Int32[]"
         if (typeName.EndsWith("[]", StringComparison.Ordinal))
         {
             var element = Resolve(typeName[..^2]);
@@ -294,7 +354,7 @@ internal sealed class CecilTypeResolver
             return byRef;
         }
 
-        // Built-in Primitives
+        // Core Primitives (scoped to CoreLibrary)
         TypeReference? resolved = typeName switch
         {
             "void" or "System.Void" => _module.TypeSystem.Void,
@@ -323,14 +383,13 @@ internal sealed class CecilTypeResolver
             return resolved;
         }
 
-        // Check local defined types in this module
+        // Local defined types in this module
         if (_localTypes.TryGetValue(typeName, out var localTypeDef))
         {
             _cache[typeName] = localTypeDef;
             return localTypeDef;
         }
 
-        // Clean generic arguments for reference (e.g. List`1<System.Int32> -> List`1)
         var cleaned = typeName;
         var bracketIndex = cleaned.IndexOf('<');
         if (bracketIndex >= 0)
@@ -338,21 +397,56 @@ internal sealed class CecilTypeResolver
             cleaned = cleaned[..bracketIndex];
         }
 
-        // Separate Namespace and Name
-        var lastDot = cleaned.LastIndexOf('.');
-        string ns = lastDot >= 0 ? cleaned[..lastDot] : string.Empty;
-        string name = lastDot >= 0 ? cleaned[(lastDot + 1)..] : cleaned;
-
-        // Check again with cleaned name
         if (_localTypes.TryGetValue(cleaned, out var localCleaned))
         {
             _cache[typeName] = localCleaned;
             return localCleaned;
         }
 
-        // Construct TypeReference referencing CoreLibrary for external types
-        var extRef = new TypeReference(ns, name, _module, _module.TypeSystem.CoreLibrary);
+        var lastDot = cleaned.LastIndexOf('.');
+        string ns = lastDot >= 0 ? cleaned[..lastDot] : string.Empty;
+        string name = lastDot >= 0 ? cleaned[(lastDot + 1)..] : cleaned;
+
+        // Accurate cross-assembly scoping:
+        // 1. Check if type lives in another assembly generated in this dump
+        IMetadataScope scope;
+        if (_globalTypeMap.TryGetValue(cleaned, out var sourceAssembly) &&
+            !string.Equals(sourceAssembly, _currentAssemblyName, StringComparison.OrdinalIgnoreCase))
+        {
+            scope = GetOrCreateAssemblyReference(sourceAssembly);
+        }
+        // 2. Core System namespace types -> CoreLibrary
+        else if (ns.StartsWith("System", StringComparison.Ordinal))
+        {
+            scope = _module.TypeSystem.CoreLibrary;
+        }
+        // 3. UnityEngine types -> UnityEngine.CoreModule
+        else if (ns.StartsWith("UnityEngine", StringComparison.Ordinal))
+        {
+            scope = GetOrCreateAssemblyReference("UnityEngine.CoreModule");
+        }
+        // 4. Default to root namespace as assembly name
+        else
+        {
+            var rootNs = ns.Contains('.') ? ns[..ns.IndexOf('.')] : ns;
+            scope = string.IsNullOrEmpty(rootNs)
+                ? _module.TypeSystem.CoreLibrary
+                : GetOrCreateAssemblyReference(rootNs);
+        }
+
+        var extRef = new TypeReference(ns, name, _module, scope);
         _cache[typeName] = extRef;
         return extRef;
+    }
+
+    private AssemblyNameReference GetOrCreateAssemblyReference(string assemblyName)
+    {
+        if (_asmRefs.TryGetValue(assemblyName, out var existing))
+            return existing;
+
+        var newRef = new AssemblyNameReference(assemblyName, new Version(0, 0, 0, 0));
+        _module.AssemblyReferences.Add(newRef);
+        _asmRefs[assemblyName] = newRef;
+        return newRef;
     }
 }

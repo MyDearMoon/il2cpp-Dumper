@@ -90,7 +90,7 @@ public sealed class CppSdkExporter : IExporter
                     continue;
                 }
 
-                // Reference types inherit from Il2CppObject; value types don't have object header
+                writer.WriteLine("#pragma pack(push, 1)");
                 if (type.IsValueType)
                 {
                     writer.WriteLine($"struct {cppName} {{");
@@ -146,6 +146,7 @@ public sealed class CppSdkExporter : IExporter
                 }
 
                 writer.WriteLine("};");
+                writer.WriteLine("#pragma pack(pop)");
                 writer.WriteLine();
 
                 // Method function pointer typedefs with concrete parameter and return types
@@ -194,7 +195,7 @@ public sealed class CppSdkExporter : IExporter
             "bool" or "System.Boolean" => ("bool", 1),
             "byte" or "System.Byte" => ("uint8_t", 1),
             "sbyte" or "System.SByte" => ("int8_t", 1),
-            "char" or "System.Char" => ("wchar_t", 2),
+            "char" or "System.Char" => ("char16_t", 2),
             "short" or "System.Int16" => ("int16_t", 2),
             "ushort" or "System.UInt16" => ("uint16_t", 2),
             "int" or "System.Int32" => ("int32_t", 4),

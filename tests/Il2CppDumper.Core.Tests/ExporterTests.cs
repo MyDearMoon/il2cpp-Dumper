@@ -48,6 +48,30 @@ public class ExporterTests
             IsPrivate = true
         });
 
+        playerType.Fields.Add(new FieldModel
+        {
+            Name = "initial",
+            TypeName = "System.Char",
+            Offset = 0x20,
+            IsPublic = true
+        });
+
+        playerType.Fields.Add(new FieldModel
+        {
+            Name = "target",
+            TypeName = "UnityEngine.GameObject",
+            Offset = 0x28,
+            IsPublic = true
+        });
+
+        var ctorMethod = new MethodModel
+        {
+            Name = ".ctor",
+            ReturnType = "System.Void",
+            IsPublic = true
+        };
+        playerType.Methods.Add(ctorMethod);
+
         var method = new MethodModel
         {
             Name = "TakeDamage",
@@ -90,9 +114,39 @@ public class ExporterTests
             Offset = 0x0
         });
 
+        var enumType = new TypeModel
+        {
+            ImageName = "Assembly-CSharp.dll",
+            Namespace = "Game.Gameplay",
+            Name = "PlayerState",
+            IsEnum = true,
+            IsValueType = true,
+            IsPublic = true
+        };
+        enumType.Fields.Add(new FieldModel
+        {
+            Name = "Idle",
+            TypeName = "System.Int32",
+            IsStatic = true,
+            IsConst = true
+        });
+
         img.Types.Add(playerType);
         img.Types.Add(structType);
+        img.Types.Add(enumType);
         ctx.Images.Add(img);
+
+        // Add second image to test cross-assembly reference resolution
+        var unityImg = new ImageModel { Name = "UnityEngine.CoreModule.dll" };
+        unityImg.Types.Add(new TypeModel
+        {
+            ImageName = "UnityEngine.CoreModule.dll",
+            Namespace = "UnityEngine",
+            Name = "GameObject",
+            IsPublic = true
+        });
+        ctx.Images.Add(unityImg);
+
         return ctx;
     }
 
@@ -192,6 +246,26 @@ public class ExporterTests
             var structDef = assembly.MainModule.Types.FirstOrDefault(t => t.Name == "PlayerStats");
             Assert.NotNull(structDef);
             Assert.Equal("System.ValueType", structDef.BaseType.FullName);
+
+            // Assert constructor (.ctor) is preserved and has SpecialName + RTSpecialName
+            var ctor = type.Methods.FirstOrDefault(m => m.Name == ".ctor");
+            Assert.NotNull(ctor);
+            Assert.True(ctor.Attributes.HasFlag(MethodAttributes.SpecialName));
+            Assert.True(ctor.Attributes.HasFlag(MethodAttributes.RTSpecialName));
+
+            // Assert cross-assembly type reference scopes to UnityEngine.CoreModule (not CoreLibrary/corlib)
+            var targetField = type.Fields.FirstOrDefault(f => f.Name == "target");
+            Assert.NotNull(targetField);
+            Assert.Equal("UnityEngine.GameObject", targetField.FieldType.FullName);
+            Assert.Equal("UnityEngine.CoreModule", targetField.FieldType.Scope.Name);
+
+            // Assert enum has synthesized value__ backing field with SpecialName + RTSpecialName
+            var enumDef = assembly.MainModule.Types.FirstOrDefault(t => t.Name == "PlayerState");
+            Assert.NotNull(enumDef);
+            var valueField = enumDef.Fields.FirstOrDefault(f => f.Name == "value__");
+            Assert.NotNull(valueField);
+            Assert.True(valueField.Attributes.HasFlag(FieldAttributes.SpecialName));
+            Assert.True(valueField.Attributes.HasFlag(FieldAttributes.RTSpecialName));
         }
         finally
         {
@@ -219,6 +293,9 @@ public class ExporterTests
 
             var header = File.ReadAllText(headerPath);
             Assert.Contains("struct Il2CppObject", header);
+            Assert.Contains("#pragma pack(push, 1)", header);
+            Assert.Contains("#pragma pack(pop)", header);
+            Assert.Contains("char16_t initial; // Offset: 0x20", header);
             Assert.Contains("struct Game_Gameplay_PlayerController : public Il2CppObject {", header);
             Assert.Contains("uint8_t _pad_0x10[0x8];", header);
             Assert.Contains("int32_t health; // Offset: 0x18", header);

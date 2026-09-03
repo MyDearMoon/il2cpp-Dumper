@@ -8,7 +8,7 @@ namespace Il2CppDumper.Core.Containers;
 
 public static class UnityVersionDetector
 {
-    private static readonly Regex VersionRegex = new(@"\b(20\d\d\.\d+\.\d+[a-z0-9]*|6000\.\d+\.\d+[a-z0-9]*)\b", RegexOptions.Compiled);
+    private static readonly Regex VersionRegex = new(@"\b([2-9]\d{3}\.\d+\.\d+[a-z0-9]*)\b", RegexOptions.Compiled);
     private static readonly Regex PlistVersionRegex = new(@"<key>UnityVersion</key>\s*<string>([^<]+)</string>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static UnityVersion Detect(string? gameDirectory, string? binaryPath, string? metadataPath, Action<string>? logger = null)
