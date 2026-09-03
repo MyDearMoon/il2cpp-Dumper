@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Il2CppDumper.Cli/Il2CppDumper.Cli.csproj" />
+    <Project Path="src/Il2CppDumper.Core/Il2CppDumper.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Il2CppDumper.Core.Tests/Il2CppDumper.Core.Tests.csproj" />
+  </Folder>
+</Solution>

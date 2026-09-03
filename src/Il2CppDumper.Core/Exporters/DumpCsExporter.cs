@@ -1,0 +1,206 @@
+using System.Text;
+using System.Text.Json;
+using Il2CppDumper.Core.Model;
+
+namespace Il2CppDumper.Core.Exporters;
+
+public sealed class DumpCsExporter : IExporter
+{
+    public string Name => "C# Static Dump (dump.cs & script.json)";
+
+    public void Export(DumpContext context, string outputDirectory, ExportOptions options, Action<string>? logger = null)
+    {
+        Directory.CreateDirectory(outputDirectory);
+
+        if (options.ExportDumpCs)
+        {
+            logger?.Invoke("Generating dump.cs...");
+            var dumpCsPath = Path.Combine(outputDirectory, "dump.cs");
+            using var writer = new StreamWriter(dumpCsPath, false, Encoding.UTF8);
+
+            writer.WriteLine("// ===========================================================================");
+            writer.WriteLine("// Dumped by Il2Cpp-Dumper (All-in-One)");
+            writer.WriteLine($"// Metadata Version: {context.MetadataVersion}");
+            writer.WriteLine($"// Unity Version: {context.UnityVersion}");
+            writer.WriteLine($"// Architecture: {context.Architecture} | Format: {context.Format}");
+            writer.WriteLine($"// Dump Date: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+            writer.WriteLine($"// Assemblies: {context.TotalImages} | Types: {context.TotalTypes} | Methods: {context.TotalMethods}");
+            writer.WriteLine("// ===========================================================================");
+            writer.WriteLine();
+
+            foreach (var img in context.Images)
+            {
+                writer.WriteLine($"// Image: {img.Name} - Types: {img.Types.Count}");
+
+                // Group types by namespace
+                var namespaceGroups = img.Types.GroupBy(t => t.Namespace);
+                foreach (var group in namespaceGroups)
+                {
+                    var ns = group.Key;
+                    var hasNamespace = !string.IsNullOrEmpty(ns);
+                    var indent = hasNamespace ? "\t" : "";
+
+                    if (hasNamespace)
+                    {
+                        writer.WriteLine($"namespace {ns}");
+                        writer.WriteLine("{");
+                    }
+
+                    foreach (var type in group)
+                    {
+                        writer.WriteLine($"{indent}// TypeDefIndex: {type.TypeDefIndex} | Assembly: {img.Name}");
+                        if (!string.IsNullOrEmpty(type.BaseTypeName))
+                        {
+                            writer.WriteLine($"{indent}// BaseType: {type.BaseTypeName}");
+                        }
+
+                        var typeKind = type.IsEnum ? "enum" : (type.IsValueType ? "struct" : (type.IsInterface ? "interface" : "class"));
+                        var access = type.IsPublic ? "public" : "internal";
+                        var abstractModifier = (type.IsAbstract && !type.IsInterface && !type.IsValueType) ? "abstract " : "";
+
+                        writer.WriteLine($"{indent}{access} {abstractModifier}{typeKind} {SanitizeIdentifier(type.Name)}");
+                        writer.WriteLine($"{indent}{{");
+
+                        // Fields
+                        if (type.Fields.Count > 0)
+                        {
+                            writer.WriteLine($"{indent}\t// Fields");
+                            foreach (var field in type.Fields)
+                            {
+                                var fieldAccess = field.IsPublic ? "public" : (field.IsPrivate ? "private" : "internal");
+                                var staticMod = field.IsStatic ? (field.IsConst ? "const " : "static ") : "";
+                                var offsetStr = field.Offset >= 0 ? $"0x{field.Offset:X}" : "N/A";
+                                writer.WriteLine($"{indent}\t{fieldAccess} {staticMod}{SanitizeType(field.TypeName)} {SanitizeIdentifier(field.Name)}; // Offset: {offsetStr}");
+                            }
+                            writer.WriteLine();
+                        }
+
+                        // Properties
+                        if (type.Properties.Count > 0)
+                        {
+                            writer.WriteLine($"{indent}\t// Properties");
+                            foreach (var prop in type.Properties)
+                            {
+                                var accessors = "";
+                                if (prop.Getter != null) accessors += "get; ";
+                                if (prop.Setter != null) accessors += "set; ";
+                                if (string.IsNullOrEmpty(accessors)) accessors = "get; ";
+                                writer.WriteLine($"{indent}\tpublic {SanitizeType(prop.TypeName)} {SanitizeIdentifier(prop.Name)} {{ {accessors}}}");
+                            }
+                            writer.WriteLine();
+                        }
+
+                        // Methods
+                        if (type.Methods.Count > 0)
+                        {
+                            writer.WriteLine($"{indent}\t// Methods");
+                            foreach (var method in type.Methods)
+                            {
+                                var rvaStr = method.Rva != 0 ? $"0x{method.Rva:X}" : "0x0";
+                                var offsetStr = method.FileOffset >= 0 ? $"0x{method.FileOffset:X}" : "0x0";
+                                var vaStr = method.MethodPointer != 0 ? $"0x{method.MethodPointer:X}" : "0x0";
+
+                                writer.WriteLine($"{indent}\t// RVA: {rvaStr} Offset: {offsetStr} VA: {vaStr} Slot: {method.Slot}");
+
+                                var methodAccess = method.IsPublic ? "public" : (method.IsPrivate ? "private" : "internal");
+                                var staticMod = method.IsStatic ? "static " : "";
+                                var virtMod = method.IsVirtual ? "virtual " : "";
+                                var absMod = method.IsAbstract ? "abstract " : "";
+
+                                var paramList = string.Join(", ", method.Parameters.Select(p => $"{SanitizeType(p.TypeName)} {SanitizeIdentifier(p.Name)}"));
+                                writer.WriteLine($"{indent}\t{methodAccess} {staticMod}{virtMod}{absMod}{SanitizeType(method.ReturnType)} {SanitizeIdentifier(method.Name)}({paramList}) {{ }}");
+                            }
+                        }
+
+                        writer.WriteLine($"{indent}}}");
+                        writer.WriteLine();
+                    }
+
+                    if (hasNamespace)
+                    {
+                        writer.WriteLine("}");
+                        writer.WriteLine();
+                    }
+                }
+            }
+
+            logger?.Invoke($"Wrote: {dumpCsPath}");
+        }
+
+        if (options.ExportScriptJson)
+        {
+            logger?.Invoke("Generating script.json and stringliteral.json...");
+            ExportScriptJsonInternal(context, outputDirectory, logger);
+        }
+    }
+
+    private static void ExportScriptJsonInternal(DumpContext context, string outputDirectory, Action<string>? logger)
+    {
+        var scriptMethods = new List<ScriptMethodEntry>();
+        foreach (var img in context.Images)
+        {
+            foreach (var type in img.Types)
+            {
+                foreach (var method in type.Methods)
+                {
+                    if (method.MethodPointer != 0 || method.Rva != 0)
+                    {
+                        scriptMethods.Add(new ScriptMethodEntry
+                        {
+                            Address = method.MethodPointer != 0 ? method.MethodPointer : method.Rva,
+                            Rva = method.Rva,
+                            Offset = method.FileOffset,
+                            Name = $"{type.FullName}::{method.Name}",
+                            Signature = method.Signature,
+                            TypeName = type.FullName
+                        });
+                    }
+                }
+            }
+        }
+
+        var scriptJson = new
+        {
+            MetadataVersion = context.MetadataVersion,
+            UnityVersion = context.UnityVersion,
+            Architecture = context.Architecture.ToString(),
+            TotalMethods = scriptMethods.Count,
+            ScriptMethods = scriptMethods
+        };
+
+        var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+        var scriptJsonPath = Path.Combine(outputDirectory, "script.json");
+        File.WriteAllText(scriptJsonPath, JsonSerializer.Serialize(scriptJson, jsonOptions));
+        logger?.Invoke($"Wrote: {scriptJsonPath} ({scriptMethods.Count} mapped methods)");
+
+        // String literals
+        if (context.StringLiterals.Count > 0)
+        {
+            var strJsonPath = Path.Combine(outputDirectory, "stringliteral.json");
+            File.WriteAllText(strJsonPath, JsonSerializer.Serialize(context.StringLiterals, jsonOptions));
+            logger?.Invoke($"Wrote: {strJsonPath} ({context.StringLiterals.Count} strings)");
+        }
+    }
+
+    private static string SanitizeIdentifier(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return "_unnamed";
+        return name.Replace('<', '_').Replace('>', '_').Replace('$', '_').Replace('`', '_').Replace('.', '_');
+    }
+
+    private static string SanitizeType(string typeName)
+    {
+        if (string.IsNullOrEmpty(typeName)) return "void";
+        return typeName.Replace('`', '_');
+    }
+
+    private sealed class ScriptMethodEntry
+    {
+        public ulong Address { get; set; }
+        public ulong Rva { get; set; }
+        public long Offset { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public string Signature { get; set; } = string.Empty;
+        public string TypeName { get; set; } = string.Empty;
+    }
+}

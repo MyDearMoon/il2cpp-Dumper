@@ -1,0 +1,14 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AssetRipper.LibCpp2IL" Version="1.0.9" />
+    <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+  </ItemGroup>
+
+</Project>
