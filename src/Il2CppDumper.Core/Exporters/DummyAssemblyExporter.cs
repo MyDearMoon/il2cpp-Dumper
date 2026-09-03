@@ -192,8 +192,9 @@ public sealed class DummyAssemblyExporter : IExporter
                                 }
 
                                 // Method body stub: throw null;
-                                if (!method.IsAbstract && !typeModel.IsInterface)
+                                if (!method.IsAbstract && !typeModel.IsInterface && !typeDef.IsInterface)
                                 {
+                                    mDef.Body ??= new MethodBody(mDef);
                                     mDef.Body.InitLocals = true;
                                     var il = mDef.Body.GetILProcessor();
                                     il.Emit(OpCodes.Ldnull);
