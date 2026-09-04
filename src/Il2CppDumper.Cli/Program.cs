@@ -354,13 +354,13 @@ public static class Program
         }
 
         table.AddRow("Elapsed Time", $"{result.Elapsed.TotalSeconds:F2} seconds");
-        table.AddRow("Output Directory", $"[link={result.OutputDirectory}]{result.OutputDirectory}[/]");
+        table.AddRow("Output Directory", Markup.Escape(result.OutputDirectory));
         table.AddRow("Files Generated", result.GeneratedFiles.Count.ToString());
 
         AnsiConsole.Write(table);
 
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"[bold green]Success![/] All files generated in: [cyan]{result.OutputDirectory}[/]");
+        AnsiConsole.MarkupLine($"[bold green]Success![/] All files generated in: [cyan]{Markup.Escape(result.OutputDirectory)}[/]");
 
         if (isInteractive && !Console.IsInputRedirected && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {

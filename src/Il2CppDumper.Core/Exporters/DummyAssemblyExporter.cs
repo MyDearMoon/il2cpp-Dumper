@@ -111,20 +111,24 @@ public sealed class DummyAssemblyExporter : IExporter
                         }
 
                         // Interfaces
-                        foreach (var iface in typeModel.Interfaces)
+                        if (typeModel.Interfaces != null)
                         {
-                            try
+                            foreach (var iface in typeModel.Interfaces)
                             {
-                                typeDef.Interfaces.Add(new InterfaceImplementation(resolver.Resolve(iface)));
-                            }
-                            catch
-                            {
-                                // Ignore interface resolution errors
+                                try
+                                {
+                                    if (!string.IsNullOrWhiteSpace(iface))
+                                        typeDef.Interfaces.Add(new InterfaceImplementation(resolver.Resolve(iface)));
+                                }
+                                catch
+                                {
+                                    // Ignore interface resolution errors
+                                }
                             }
                         }
 
                         // Enum backing field: CLR enums require an instance field named "value__"
-                        if (typeModel.IsEnum && !typeModel.Fields.Any(f => f.Name == "value__"))
+                        if (typeModel.IsEnum && typeModel.Fields?.Any(f => f.Name == "value__") == false)
                         {
                             var underlyingType = resolver.Resolve("System.Int32");
                             var valueField = new FieldDefinition(
@@ -135,104 +139,121 @@ public sealed class DummyAssemblyExporter : IExporter
                         }
 
                         // Fields
-                        foreach (var field in typeModel.Fields)
+                        if (typeModel.Fields != null)
                         {
-                            try
+                            foreach (var field in typeModel.Fields)
                             {
-                                var fieldAttrs = FieldAttributes.CompilerControlled;
-                                if (field.IsPublic) fieldAttrs |= FieldAttributes.Public;
-                                else if (field.IsPrivate) fieldAttrs |= FieldAttributes.Private;
-                                else fieldAttrs |= FieldAttributes.Assembly;
+                                try
+                                {
+                                    var fieldAttrs = FieldAttributes.CompilerControlled;
+                                    if (field.IsPublic) fieldAttrs |= FieldAttributes.Public;
+                                    else if (field.IsPrivate) fieldAttrs |= FieldAttributes.Private;
+                                    else fieldAttrs |= FieldAttributes.Assembly;
 
-                                if (field.IsStatic) fieldAttrs |= FieldAttributes.Static;
-                                if (field.IsConst) fieldAttrs |= FieldAttributes.Literal | FieldAttributes.HasDefault;
+                                    if (field.IsStatic) fieldAttrs |= FieldAttributes.Static;
+                                    if (field.IsConst) fieldAttrs |= FieldAttributes.Literal | FieldAttributes.HasDefault;
 
-                                var fieldType = resolver.Resolve(field.TypeName);
-                                var fDef = new FieldDefinition(SanitizeName(field.Name), fieldAttrs, fieldType);
-                                typeDef.Fields.Add(fDef);
-                            }
-                            catch
-                            {
-                                var fDef = new FieldDefinition(SanitizeName(field.Name), FieldAttributes.Public, module.TypeSystem.Object);
-                                typeDef.Fields.Add(fDef);
+                                    var fieldType = resolver.Resolve(field.TypeName);
+                                    var fDef = new FieldDefinition(SanitizeName(field.Name), fieldAttrs, fieldType);
+                                    typeDef.Fields.Add(fDef);
+                                }
+                                catch
+                                {
+                                    var fDef = new FieldDefinition(SanitizeName(field.Name), FieldAttributes.Public, resolver.Resolve("System.Object"));
+                                    typeDef.Fields.Add(fDef);
+                                }
                             }
                         }
 
                         // Methods
                         var methodMap = new Dictionary<string, MethodDefinition>(StringComparer.Ordinal);
-                        foreach (var method in typeModel.Methods)
+                        if (typeModel.Methods != null)
                         {
-                            try
+                            foreach (var method in typeModel.Methods)
                             {
-                                var isConstructor = method.Name is ".ctor" or ".cctor";
-                                var methodAttrs = MethodAttributes.HideBySig;
-
-                                if (method.IsPublic) methodAttrs |= MethodAttributes.Public;
-                                else if (method.IsPrivate) methodAttrs |= MethodAttributes.Private;
-                                else methodAttrs |= MethodAttributes.Assembly;
-
-                                if (method.IsStatic) methodAttrs |= MethodAttributes.Static;
-                                if (method.IsVirtual) methodAttrs |= MethodAttributes.Virtual | MethodAttributes.NewSlot;
-                                if (method.IsAbstract) methodAttrs |= MethodAttributes.Abstract;
-
-                                // Constructors must preserve their exact name and have SpecialName | RTSpecialName
-                                if (isConstructor)
+                                try
                                 {
-                                    methodAttrs |= MethodAttributes.SpecialName | MethodAttributes.RTSpecialName;
+                                    var isConstructor = method.Name is ".ctor" or ".cctor";
+                                    var methodAttrs = MethodAttributes.HideBySig;
+
+                                    if (method.IsPublic) methodAttrs |= MethodAttributes.Public;
+                                    else if (method.IsPrivate) methodAttrs |= MethodAttributes.Private;
+                                    else methodAttrs |= MethodAttributes.Assembly;
+
+                                    if (method.IsStatic) methodAttrs |= MethodAttributes.Static;
+                                    if (method.IsVirtual) methodAttrs |= MethodAttributes.Virtual | MethodAttributes.NewSlot;
+                                    if (method.IsAbstract) methodAttrs |= MethodAttributes.Abstract;
+
+                                    // Constructors must preserve their exact name and have SpecialName | RTSpecialName
+                                    if (isConstructor)
+                                    {
+                                        methodAttrs |= MethodAttributes.SpecialName | MethodAttributes.RTSpecialName;
+                                    }
+
+                                    var methodName = isConstructor ? method.Name : SanitizeName(method.Name);
+                                    var returnType = isConstructor ? resolver.Resolve("System.Void") : resolver.Resolve(method.ReturnType);
+                                    var mDef = new MethodDefinition(methodName, methodAttrs, returnType);
+
+                                    if (method.Parameters != null)
+                                    {
+                                        foreach (var param in method.Parameters)
+                                        {
+                                            var paramType = resolver.Resolve(param.TypeName);
+                                            mDef.Parameters.Add(new ParameterDefinition(SanitizeName(param.Name), ParameterAttributes.None, paramType));
+                                        }
+                                    }
+
+                                    // Method body stub: throw null;
+                                    // Delegates, runtime methods, and interfaces cannot have an IL body in CLI metadata
+                                    var isDelegate = typeModel.BaseTypeName?.Contains("Delegate") == true;
+                                    if (!method.IsAbstract && !typeModel.IsInterface && !typeDef.IsInterface && !isDelegate)
+                                    {
+                                        mDef.Body ??= new MethodBody(mDef);
+                                        mDef.Body.InitLocals = true;
+                                        var il = mDef.Body.GetILProcessor();
+                                        il.Emit(OpCodes.Ldnull);
+                                        il.Emit(OpCodes.Throw);
+                                    }
+
+                                    typeDef.Methods.Add(mDef);
+                                    if (!string.IsNullOrEmpty(method.Name))
+                                    {
+                                        methodMap[method.Name] = mDef;
+                                    }
                                 }
-
-                                var methodName = isConstructor ? method.Name : SanitizeName(method.Name);
-                                var returnType = isConstructor ? module.TypeSystem.Void : resolver.Resolve(method.ReturnType);
-                                var mDef = new MethodDefinition(methodName, methodAttrs, returnType);
-
-                                foreach (var param in method.Parameters)
+                                catch (Exception ex)
                                 {
-                                    var paramType = resolver.Resolve(param.TypeName);
-                                    mDef.Parameters.Add(new ParameterDefinition(SanitizeName(param.Name), ParameterAttributes.None, paramType));
+                                    logger?.Invoke($"[Warning] Failed to generate method {method.Name} in {typeModel.FullName}: {ex.Message}");
                                 }
-
-                                // Method body stub: throw null;
-                                if (!method.IsAbstract && !typeModel.IsInterface && !typeDef.IsInterface)
-                                {
-                                    mDef.Body ??= new MethodBody(mDef);
-                                    mDef.Body.InitLocals = true;
-                                    var il = mDef.Body.GetILProcessor();
-                                    il.Emit(OpCodes.Ldnull);
-                                    il.Emit(OpCodes.Throw);
-                                }
-
-                                typeDef.Methods.Add(mDef);
-                                methodMap[method.Name] = mDef;
-                            }
-                            catch (Exception ex)
-                            {
-                                logger?.Invoke($"[Warning] Failed to generate method {method.Name} in {typeModel.FullName}: {ex.Message}");
                             }
                         }
 
                         // Properties
-                        foreach (var prop in typeModel.Properties)
+                        if (typeModel.Properties != null)
                         {
-                            try
+                            foreach (var prop in typeModel.Properties)
                             {
-                                var propType = resolver.Resolve(prop.TypeName);
-                                var pDef = new PropertyDefinition(SanitizeName(prop.Name), PropertyAttributes.None, propType);
-
-                                if (prop.Getter != null && methodMap.TryGetValue(prop.Getter.Name, out var getter))
+                                try
                                 {
-                                    pDef.GetMethod = getter;
-                                }
+                                    var propType = resolver.Resolve(prop.TypeName);
+                                    var pDef = new PropertyDefinition(SanitizeName(prop.Name), PropertyAttributes.None, propType);
 
-                                if (prop.Setter != null && methodMap.TryGetValue(prop.Setter.Name, out var setter))
+                                    if (prop.Getter?.Name != null && methodMap.TryGetValue(prop.Getter.Name, out var getter))
+                                    {
+                                        pDef.GetMethod = getter;
+                                    }
+
+                                    if (prop.Setter?.Name != null && methodMap.TryGetValue(prop.Setter.Name, out var setter))
+                                    {
+                                        pDef.SetMethod = setter;
+                                    }
+
+                                    typeDef.Properties.Add(pDef);
+                                }
+                                catch
                                 {
-                                    pDef.SetMethod = setter;
+                                    // Ignore property error
                                 }
-
-                                typeDef.Properties.Add(pDef);
-                            }
-                            catch
-                            {
-                                // Ignore property error
                             }
                         }
                     }
@@ -292,6 +313,7 @@ internal sealed class CecilTypeResolver
     private readonly string _currentAssemblyName;
     private readonly Dictionary<string, AssemblyNameReference> _asmRefs = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TypeReference> _cache = new(StringComparer.Ordinal);
+    private readonly IMetadataScope _coreScope;
 
     public CecilTypeResolver(
         ModuleDefinition module,
@@ -303,6 +325,7 @@ internal sealed class CecilTypeResolver
         _localTypes = localTypes;
         _globalTypeMap = globalTypeMap;
         _currentAssemblyName = currentAssemblyName;
+        _coreScope = _module.TypeSystem.CoreLibrary;
 
         // Populate existing assembly references
         foreach (var r in _module.AssemblyReferences)
@@ -314,7 +337,7 @@ internal sealed class CecilTypeResolver
     public TypeReference Resolve(string? rawTypeName)
     {
         if (string.IsNullOrWhiteSpace(rawTypeName))
-            return _module.TypeSystem.Void;
+            return ResolvePrimitive("System.Void");
 
         var typeName = rawTypeName.Trim();
 
@@ -355,43 +378,18 @@ internal sealed class CecilTypeResolver
             return byRef;
         }
 
-        // Core Primitives (scoped to CoreLibrary)
-        TypeReference? resolved = typeName switch
-        {
-            "void" or "System.Void" => _module.TypeSystem.Void,
-            "bool" or "System.Boolean" => _module.TypeSystem.Boolean,
-            "byte" or "System.Byte" => _module.TypeSystem.Byte,
-            "sbyte" or "System.SByte" => _module.TypeSystem.SByte,
-            "short" or "System.Int16" => _module.TypeSystem.Int16,
-            "ushort" or "System.UInt16" => _module.TypeSystem.UInt16,
-            "int" or "System.Int32" => _module.TypeSystem.Int32,
-            "uint" or "System.UInt32" => _module.TypeSystem.UInt32,
-            "long" or "System.Int64" => _module.TypeSystem.Int64,
-            "ulong" or "System.UInt64" => _module.TypeSystem.UInt64,
-            "float" or "System.Single" => _module.TypeSystem.Single,
-            "double" or "System.Double" => _module.TypeSystem.Double,
-            "char" or "System.Char" => _module.TypeSystem.Char,
-            "string" or "System.String" => _module.TypeSystem.String,
-            "object" or "System.Object" => _module.TypeSystem.Object,
-            "IntPtr" or "System.IntPtr" => _module.TypeSystem.IntPtr,
-            "UIntPtr" or "System.UIntPtr" => _module.TypeSystem.UIntPtr,
-            _ => null
-        };
+        // 1. Normalize C# primitive aliases
+        var normalized = NormalizePrimitive(typeName);
 
-        if (resolved != null)
-        {
-            _cache[typeName] = resolved;
-            return resolved;
-        }
-
-        // Local defined types in this module
-        if (_localTypes.TryGetValue(typeName, out var localTypeDef))
+        // 2. Check local defined types in this module first
+        if (_localTypes.TryGetValue(normalized, out var localTypeDef))
         {
             _cache[typeName] = localTypeDef;
             return localTypeDef;
         }
 
-        var cleaned = typeName;
+        // 3. Handle generics: strip generic arguments for base definition lookup
+        var cleaned = normalized;
         var bracketIndex = cleaned.IndexOf('<');
         if (bracketIndex >= 0)
         {
@@ -404,40 +402,112 @@ internal sealed class CecilTypeResolver
             return localCleaned;
         }
 
+        // 4. Primitive types: safe resolution using _coreScope without calling _module.TypeSystem primitives
+        // which throw NullReferenceException on dynamic modules created with CreateAssembly
+        if (IsPrimitive(cleaned, out var isValueType))
+        {
+            var prim = CreatePrimitiveRef(cleaned, isValueType);
+            _cache[typeName] = prim;
+            return prim;
+        }
+
         var lastDot = cleaned.LastIndexOf('.');
         string ns = lastDot >= 0 ? cleaned[..lastDot] : string.Empty;
         string name = lastDot >= 0 ? cleaned[(lastDot + 1)..] : cleaned;
 
-        // Accurate cross-assembly scoping:
-        // 1. Check if type lives in another assembly generated in this dump
+        // 5. Cross-assembly scoping
         IMetadataScope scope;
         if (_globalTypeMap.TryGetValue(cleaned, out var sourceAssembly) &&
             !string.Equals(sourceAssembly, _currentAssemblyName, StringComparison.OrdinalIgnoreCase))
         {
             scope = GetOrCreateAssemblyReference(sourceAssembly);
         }
-        // 2. Core System namespace types -> CoreLibrary
         else if (ns.StartsWith("System", StringComparison.Ordinal))
         {
-            scope = _module.TypeSystem.CoreLibrary;
+            scope = _coreScope;
         }
-        // 3. UnityEngine types -> UnityEngine.CoreModule
         else if (ns.StartsWith("UnityEngine", StringComparison.Ordinal))
         {
             scope = GetOrCreateAssemblyReference("UnityEngine.CoreModule");
         }
-        // 4. Default to root namespace as assembly name
         else
         {
             var rootNs = ns.Contains('.') ? ns[..ns.IndexOf('.')] : ns;
             scope = string.IsNullOrEmpty(rootNs)
-                ? _module.TypeSystem.CoreLibrary
+                ? _coreScope
                 : GetOrCreateAssemblyReference(rootNs);
         }
 
         var extRef = new TypeReference(ns, name, _module, scope);
         _cache[typeName] = extRef;
         return extRef;
+    }
+
+    private static string NormalizePrimitive(string name) => name switch
+    {
+        "void" => "System.Void",
+        "bool" => "System.Boolean",
+        "byte" => "System.Byte",
+        "sbyte" => "System.SByte",
+        "short" => "System.Int16",
+        "ushort" => "System.UInt16",
+        "int" => "System.Int32",
+        "uint" => "System.UInt32",
+        "long" => "System.Int64",
+        "ulong" => "System.UInt64",
+        "float" => "System.Single",
+        "double" => "System.Double",
+        "char" => "System.Char",
+        "string" => "System.String",
+        "object" => "System.Object",
+        "IntPtr" => "System.IntPtr",
+        "UIntPtr" => "System.UIntPtr",
+        _ => name
+    };
+
+    private static bool IsPrimitive(string fullName, out bool isValueType)
+    {
+        switch (fullName)
+        {
+            case "System.Void":
+            case "System.Boolean":
+            case "System.Byte":
+            case "System.SByte":
+            case "System.Int16":
+            case "System.UInt16":
+            case "System.Int32":
+            case "System.UInt32":
+            case "System.Int64":
+            case "System.UInt64":
+            case "System.Single":
+            case "System.Double":
+            case "System.Char":
+            case "System.IntPtr":
+            case "System.UIntPtr":
+                isValueType = true;
+                return true;
+            case "System.String":
+            case "System.Object":
+                isValueType = false;
+                return true;
+            default:
+                isValueType = false;
+                return false;
+        }
+    }
+
+    private TypeReference CreatePrimitiveRef(string fullName, bool isValueType)
+    {
+        var lastDot = fullName.LastIndexOf('.');
+        var ns = lastDot >= 0 ? fullName[..lastDot] : "System";
+        var name = lastDot >= 0 ? fullName[(lastDot + 1)..] : fullName;
+        return new TypeReference(ns, name, _module, _coreScope) { IsValueType = isValueType };
+    }
+
+    private TypeReference ResolvePrimitive(string fullName)
+    {
+        IsPrimitive(fullName, out var isValueType);
+        return CreatePrimitiveRef(fullName, isValueType);
     }
 
     private AssemblyNameReference GetOrCreateAssemblyReference(string assemblyName)

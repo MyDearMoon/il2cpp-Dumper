@@ -33,4 +33,6 @@ TestResults/
 dump/
 output/
 test_dump_*/
+build/
+publish/
 

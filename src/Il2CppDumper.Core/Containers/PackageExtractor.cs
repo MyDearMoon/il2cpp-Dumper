@@ -303,9 +303,21 @@ public static class PackageExtractor
         }
         else
         {
-            ctx.BinaryPath = filePath;
-            ctx.Architecture = DetectArchitectureFromPath(filePath);
-            ctx.Format = DetectFormat(filePath);
+            // If user dropped the game executable (e.g. BlueArchive.exe), resolve GameAssembly.dll alongside it
+            var targetBinary = filePath;
+            if (fileName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && !BinaryNames.Contains(fileName))
+            {
+                var gameAssembly = Path.Combine(dir, "GameAssembly.dll");
+                if (File.Exists(gameAssembly))
+                {
+                    targetBinary = gameAssembly;
+                    logger?.Invoke($"Target is game executable. Automatically resolved GameAssembly.dll: {gameAssembly}");
+                }
+            }
+
+            ctx.BinaryPath = targetBinary;
+            ctx.Architecture = DetectArchitectureFromPath(targetBinary);
+            ctx.Format = DetectFormat(targetBinary);
 
             if (!string.IsNullOrEmpty(metadataOverride) && File.Exists(metadataOverride))
             {

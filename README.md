@@ -1,48 +1,79 @@
 # Il2CppDumper
 
-Unity IL2CPP extraction and reverse engineering tool for Windows, Android, and iOS.
+A fast, lightweight tool to extract types, methods, fields, and symbols from Unity IL2CPP games.
 
-Supports:
-- Dumping `dump.cs` with field offsets, method RVAs, and signatures.
-- Rebuilding typed dummy assemblies (`DummyDll/*.dll`) via Mono.Cecil for dnSpy, ILSpy, and BepInEx modding.
-- Generating C++ SDK headers (`il2cpp.h`) with byte-accurate struct layouts.
-- Auto-restoration scripts for IDA Pro, Ghidra, and Binary Ninja.
-- Container ingestion (.apk, .xapk, .apkm, .ipa, zip, game directory).
+Supports Windows, Android (APK, XAPK, APKM), and iOS (IPA).
 
 ---
 
-## Features
+## Quick Start
 
-- **Container Ingestion**: Drag-and-drop `.apk`, `.xapk`, `.apkm`, `.ipa`, or game folders directly. Automatic detection for `arm64-v8a`, `armeabi-v7a`, `x86_64`, and `x86`.
-- **C# Static Header Dump (`dump.cs`)**: Clean definitions with namespaces, classes, methods (with RVAs, file offsets, and VAs), fields (with memory offsets), and properties.
-- **Disassembler Scripts**: Ready-to-use symbol restoration scripts for IDA Pro (`ida.py`), Ghidra (`ghidra.py`), and Binary Ninja (`binja.py`).
-- **Dummy DLL Assemblies (`DummyDll/*.dll`)**: Valid .NET assemblies emitted via `Mono.Cecil` for inspection in dnSpy, ILSpy, or referencing in BepInEx mods.
-- **C++ Modding SDK**: Generates `il2cpp.h` with struct offsets and function typedefs, `il2cpp-init.h` runtime address resolver, and a ready-to-compile MinHook template (`dllmain.cpp`).
-- **Runtime Memory Dumping Tools**: Bundled Frida scripts (`frida-dump-android.js`, `frida-dump-pc.js`) for games with on-disk encrypted metadata.
+1. Download the latest standalone release for your platform from [Releases](https://github.com/MyDearMoon/il2cpp-Dumper/releases).
+2. **Drag and drop** your game executable (`Game.exe`), mobile package (`.apk` / `.xapk`), or game folder directly onto `Il2CppDumper.exe`.
+3. The tool automatically resolves `GameAssembly.dll` and `global-metadata.dat` and dumps everything into a `dump/` folder next to your target.
 
 ---
 
 ## Target Compatibility
 
-| Target Category | Examples | Static Dump | Notes |
+| Category | Examples | Status | Notes |
 | :--- | :--- | :---: | :--- |
-| **Standard Unity IL2CPP** | *Aim Lab*, *Blue Archive*, *Yu-Gi-Oh! Master Duel*, *Crab Game* | Supported | Unity 2020 through Unity 6 supported |
+| **Standard IL2CPP** | *Blue Archive*, *Aim Lab*, *Master Duel*, *Crab Game* | Supported | Unity 2018 through Unity 6 |
 | **Obfuscated IL2CPP** | *Goose Goose Duck*, *Gorilla Tag* | Supported | Automatic identifier sanitization |
-| **Split Android Bundles** | *Subway Surfers*, *Pokemon UNITE* | Supported | Handled via `.xapk` / `.apkm` unpacker |
-| **Unity Mono Games** | *Muck*, *Lethal Company*, *Valheim* | N/A | No dump needed; inspect `Managed/Assembly-CSharp.dll` in dnSpy |
-| **Encrypted Metadata** | *Zenless Zone Zero*, *Genshin Impact*, *VRChat* | Memory Dump Only | Metadata encrypted on disk (`MHY\0` or custom cipher) |
+| **Split Bundles** | *Subway Surfers*, *Pokemon UNITE* | Supported | Automatic `.xapk` / `.apkm` extraction |
+| **Unity Mono** | *Lethal Company*, *Valheim*, *Muck* | N/A | No dump needed; inspect DLL directly in dnSpy |
+| **Encrypted Metadata** | *Zenless Zone Zero*, *Genshin Impact*, *VRChat* | Memory Only | Use included Frida runtime dumper |
 
-For a detailed technical breakdown of why certain games fail static dumps and how to work with them, see [COMPATIBILITY.md](COMPATIBILITY.md).
+For a deeper technical breakdown on encrypted metadata and anti-cheat constraints, see [COMPATIBILITY.md](COMPATIBILITY.md).
 
-## Download
+---
 
-Pre-compiled standalone binaries are available on the [Releases](https://github.com/MyDearMoon/il2cpp-Dumper/releases) page for Windows, Linux, and macOS. No .NET runtime or SDK installation is required when using pre-built binaries.
+## What It Generates
+
+All outputs are saved to the `dump/` folder:
+
+| File / Folder | Purpose |
+| :--- | :--- |
+| `dump.cs` | Human-readable C# pseudo-code with field memory offsets and method RVAs |
+| `script.json` | Symbol table mapping functions, offsets, and strings for tooling |
+| `DummyDll/` | Stripped .NET assemblies for browsing in dnSpy, ILSpy, or referencing in BepInEx |
+| `ida.py` / `ghidra.py` / `binja.py` | One-click symbol restoration scripts for IDA Pro, Ghidra, and Binary Ninja |
+| `cpp-sdk/` | C++ headers (`il2cpp.h`, `il2cpp-init.h`) with struct layouts and hook scaffolding |
+| `frida-runtime-dumper/` | In-memory dumpers for games with on-disk encrypted metadata |
+
+---
+
+## Command Line Usage
+
+Run directly from the terminal without flags:
+
+```bash
+# Dump from a game executable, directory, or mobile package:
+Il2CppDumper "C:/Games/MyGame/MyGame.exe"
+Il2CppDumper game.apk
+
+# Or pass binary and metadata explicitly:
+Il2CppDumper GameAssembly.dll global-metadata.dat
+Il2CppDumper GameAssembly.dll global-metadata.dat ./custom_output
+```
+
+### Options
+
+| Flag | Description |
+| :--- | :--- |
+| `-i, --input <path>` | Input file or folder |
+| `-m, --metadata <path>` | Path to `global-metadata.dat` (if stored elsewhere) |
+| `-o, --output <path>` | Output destination folder (defaults to `./dump`) |
+| `-a, --arch <name>` | Target architecture (`arm64`, `armv7`, `x64`, `x86`) |
+| `--all` | Export all components (default) |
+| `--dump-cs` / `--dummy` / `--cpp` | Select specific export components |
 
 ---
 
 ## Building from Source
 
-Requirements: [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) or higher.
+Requires [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) or higher.
+
 ```bash
 git clone https://github.com/MyDearMoon/il2cpp-Dumper.git
 cd il2cpp-Dumper
@@ -51,81 +82,6 @@ dotnet build Il2CppDumper.slnx -c Release
 
 ---
 
-## Usage
-
-### 1. Interactive Mode (Recommended)
-Simply launch without arguments:
-```bash
-dotnet run --project src/Il2CppDumper.Cli
-```
-You will be prompted to drag-and-drop your target file or folder, select the target architecture, and choose which outputs to generate.
-
-### 2. Command Line
-
-Positional syntax (no flags required):
-```bash
-# Dump from a game directory or mobile package directly:
-il2cpp-dumper "C:/Games/MyGame"
-il2cpp-dumper game.apk
-
-# Pair binary and metadata directly:
-il2cpp-dumper GameAssembly.dll global-metadata.dat
-il2cpp-dumper GameAssembly.dll global-metadata.dat ./custom_output
-```
-
-Flag syntax (for CI/CD and automation):
-```bash
-# Specify target architecture or selective exports:
-il2cpp-dumper -i game.xapk -a arm64 -o ./output --all
-il2cpp-dumper -i "C:/Games/MyGame" --dummy --cpp
-```
-
-### CLI Options
-
-| Flag | Description |
-| :--- | :--- |
-| `-i, --input <path>` | Target input (APK, XAPK, APKM, IPA, ZIP, Game Folder, or binary) |
-| `-m, --metadata <path>` | Optional explicit path to `global-metadata.dat` |
-| `-o, --output <path>` | Output destination folder (defaults to `./dump`) |
-| `-a, --arch <name>` | Preferred architecture (`arm64`, `armv7`, `x64`, `x86`) |
-| `--all` | Export all formats |
-| `--dump-cs` | Export `dump.cs` and `script.json` |
-| `--scripts` | Export IDA, Ghidra, and Binary Ninja Python scripts |
-| `--dummy` | Export Dummy DLL assemblies (Mono.Cecil) |
-| `--cpp` | Export C++ Modding SDK (`il2cpp.h` and hooking scaffolding) |
-| `--frida` | Export Frida in-memory dumping scripts |
-| `--interactive` | Force interactive wizard mode |
-| `-h, --help` | Show command-line help |
-
----
-
-## Output Structure
-
-When running with `--all`, the output directory contains:
-```
-dump/
-├── dump.cs                   # Human-readable C# pseudo-code overview
-├── script.json               # JSON symbol table (RVAs, offsets, signatures)
-├── stringliteral.json        # Extracted string literals
-├── ida.py                    # IDA Pro symbol restoration script
-├── ghidra.py                 # Ghidra symbol restoration script
-├── binja.py                  # Binary Ninja symbol restoration script
-├── DummyDll/                 # Reference assemblies for dnSpy / BepInEx
-│   ├── Assembly-CSharp.dll
-│   ├── UnityEngine.dll
-│   └── ...
-├── cpp-sdk/                  # Native C++ hooking SDK
-│   ├── il2cpp.h              # Structs and function pointer typedefs
-│   ├── il2cpp-init.h         # Runtime base address resolver
-│   └── dllmain.cpp           # Visual Studio DLL injection hook template
-└── frida-runtime-dumper/     # In-memory runtime dumpers
-    ├── frida-dump-android.js # Android memory dumper script
-    ├── frida-dump-pc.js      # Windows PC memory dumper script
-    └── run-android.bat       # Quick-launch batch script
-```
-
----
-
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE)

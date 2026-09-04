@@ -275,6 +275,69 @@ public class ExporterTests
     }
 
     [Fact]
+    public void DummyAssemblyExporter_MonoLimitationAttribute_Reproduction()
+    {
+        var outDir = Path.Combine(Path.GetTempPath(), $"mscorlib_test_{Guid.NewGuid():N}");
+        try
+        {
+            var ctx = new DumpContext
+            {
+                MetadataVersion = 31f,
+                UnityVersion = "2021.3.56a0",
+                Architecture = Architecture.X86,
+                Format = BinaryFormat.PE
+            };
+
+            var mscorlib = new ImageModel { Name = "mscorlib.dll" };
+            var attrType = new TypeModel
+            {
+                ImageName = "mscorlib.dll",
+                Namespace = "System",
+                Name = "MonoLimitationAttribute",
+                BaseTypeName = "System.MonoTODOAttribute",
+                IsPublic = true
+            };
+            var ctor = new MethodModel
+            {
+                Name = ".ctor",
+                ReturnType = "System.Void",
+                IsPublic = true
+            };
+            ctor.Parameters.Add(new ParameterModel { Name = "comment", TypeName = "System.String" });
+            attrType.Methods.Add(ctor);
+            mscorlib.Types.Add(attrType);
+            ctx.Images.Add(mscorlib);
+
+            var messages = new List<string>();
+            var exporter = new DummyAssemblyExporter();
+            exporter.Export(ctx, outDir, ExportOptions.All, msg => messages.Add(msg));
+
+            Assert.DoesNotContain(messages, m => m.Contains("[Warning]"));
+
+            var dllPath = Path.Combine(outDir, "DummyDll", "mscorlib.dll");
+            Assert.True(File.Exists(dllPath));
+
+            using var loaded = AssemblyDefinition.ReadAssembly(dllPath);
+            Assert.NotNull(loaded);
+            var loadedType = loaded.MainModule.Types.FirstOrDefault(t => t.Name == "MonoLimitationAttribute");
+            Assert.NotNull(loadedType);
+            Assert.NotNull(loadedType.BaseType);
+            Assert.Equal("System.MonoTODOAttribute", loadedType.BaseType.FullName);
+
+            var loadedCtor = loadedType.Methods.FirstOrDefault(m => m.Name == ".ctor");
+            Assert.NotNull(loadedCtor);
+            Assert.Equal("System.Void", loadedCtor.ReturnType.FullName);
+            Assert.Single(loadedCtor.Parameters);
+            Assert.Equal("comment", loadedCtor.Parameters[0].Name);
+            Assert.Equal("System.String", loadedCtor.Parameters[0].ParameterType.FullName);
+        }
+        finally
+        {
+            if (Directory.Exists(outDir)) Directory.Delete(outDir, true);
+        }
+    }
+
+    [Fact]
     public void CppSdkExporter_GeneratesCppHeadersAndScaffolding()
     {
         var outDir = Path.Combine(Path.GetTempPath(), $"cpp_test_{Guid.NewGuid():N}");
