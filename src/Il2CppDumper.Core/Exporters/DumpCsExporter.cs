@@ -184,6 +184,7 @@ public sealed class DumpCsExporter : IExporter
     private static string SanitizeIdentifier(string name)
     {
         if (string.IsNullOrEmpty(name)) return "_unnamed";
+        if (name is ".ctor" or ".cctor") return name;
         return name.Replace('<', '_').Replace('>', '_').Replace('$', '_').Replace('`', '_').Replace('.', '_');
     }
 
