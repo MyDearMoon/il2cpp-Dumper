@@ -1,8 +1,10 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Il2CppDumper.Core;
 using Il2CppDumper.Core.Containers;
 using Il2CppDumper.Core.Exporters;
 using Spectre.Console;
+using Architecture = Il2CppDumper.Core.Containers.Architecture;
 
 namespace Il2CppDumper.Cli;
 
@@ -38,25 +40,32 @@ public static class Program
 
     private static void PrintHelp()
     {
-        AnsiConsole.MarkupLine("[bold yellow]Usage:[/] [cyan]il2cpp-dumper[/] [grey][[options]][/]");
+        AnsiConsole.MarkupLine("[bold yellow]Usage:[/] [cyan]il2cpp-dumper[/] [grey][[input]] [[metadata]] [[output]] [[options]][/]");
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine("[bold yellow]Options:[/] ");
 
+        AnsiConsole.MarkupLine("[bold yellow]Positional Arguments (No flags required):[/]");
+        AnsiConsole.MarkupLine("  [cyan]il2cpp-dumper[/] [grey]<game_folder | game.apk | game.xapk>[/]");
+        AnsiConsole.MarkupLine("  [cyan]il2cpp-dumper[/] [grey]<GameAssembly.dll | libil2cpp.so> <global-metadata.dat>[/]");
+        AnsiConsole.MarkupLine("  [cyan]il2cpp-dumper[/] [grey]<GameAssembly.dll> <global-metadata.dat> <output_dir>[/]");
+        AnsiConsole.WriteLine();
+
+        AnsiConsole.MarkupLine("[bold yellow]Options:[/] ");
         var table = new Table().Border(TableBorder.Rounded);
         table.AddColumn("[cyan]Option[/]");
         table.AddColumn("[cyan]Description[/]");
 
         table.AddRow("-i, --input <path>", "Input file (APK, XAPK, APKM, IPA, ZIP, Game Folder, libil2cpp.so, GameAssembly.dll)");
-        table.AddRow("-m, --metadata <path>", "Optional override for global-metadata.dat path");
+        table.AddRow("-m, --metadata <path>", "Optional explicit path to global-metadata.dat");
         table.AddRow("-o, --output <path>", "Output directory (defaults to './dump')");
         table.AddRow("-a, --arch <name>", "Preferred architecture: arm64, armv7, x64, x86");
-        table.AddRow("--all", "Export all formats (dump.cs, scripts, dummy DLLs, C++ SDK, Frida)");
-        table.AddRow("--dump-cs", "Export dump.cs and script.json");
+        table.AddRow("-u, --unity <version>", "Override detected Unity version (e.g. 2021.3.56)");
+        table.AddRow("--all", "Export all formats (dump.cs, scripts, dummy DLLs, C++ SDK, Frida) [Default]");
+        table.AddRow("--dump-cs", "Export dump.cs and script.json only");
         table.AddRow("--scripts", "Export IDA Pro, Ghidra, and Binary Ninja Python scripts");
         table.AddRow("--dummy", "Export Dummy DLL assemblies via Mono.Cecil (for dnSpy/BepInEx)");
         table.AddRow("--cpp", "Export C++ Modding SDK (il2cpp.h and hooking scaffolding)");
-        table.AddRow("--frida", "Export Frida runtime memory dumping scripts for encrypted games");
-        table.AddRow("--interactive", "Launch interactive wizard mode");
+        table.AddRow("--frida", "Export Frida runtime memory dumping scripts");
+        table.AddRow("--interactive", "Launch interactive guided wizard");
         table.AddRow("-h, --help", "Show this help message");
 
         AnsiConsole.Write(table);
@@ -65,8 +74,8 @@ public static class Program
 
     private static int RunInteractive()
     {
-        AnsiConsole.MarkupLine("[bold green]>>> Interactive Mode[/]");
-        AnsiConsole.MarkupLine("[grey]Drag and drop your APK, IPA, game directory, or binary file into this window and press Enter:[/]");
+        AnsiConsole.MarkupLine("[bold green]Interactive Mode[/]");
+        AnsiConsole.MarkupLine("[grey]Drag and drop your APK, IPA, game directory, or GameAssembly.dll into this window and press Enter:[/]");
 
         var inputRaw = AnsiConsole.Ask<string>("[bold yellow]Target Input:[/] ");
         var inputPath = CleanInputPath(inputRaw);
@@ -75,6 +84,23 @@ public static class Program
         {
             AnsiConsole.MarkupLine($"[bold red]Error:[/] Path does not exist: {inputPath}");
             return 1;
+        }
+
+        string? metadataPath = null;
+        if (File.Exists(inputPath) && !PackageExtractor.IsArchive(inputPath) && !inputPath.EndsWith(".dat", StringComparison.OrdinalIgnoreCase))
+        {
+            var dir = Path.GetDirectoryName(inputPath) ?? ".";
+            var hasNearby = Directory.Exists(dir) && Directory.EnumerateFiles(dir, "global-metadata.dat", SearchOption.AllDirectories).Any();
+            if (!hasNearby)
+            {
+                var metaRaw = AnsiConsole.Prompt(
+                    new TextPrompt<string>("[bold yellow]Path to global-metadata.dat (press Enter if in same folder):[/] ")
+                        .AllowEmpty());
+                if (!string.IsNullOrWhiteSpace(metaRaw))
+                {
+                    metadataPath = CleanInputPath(metaRaw);
+                }
+            }
         }
 
         // Output directory prompt
@@ -86,7 +112,7 @@ public static class Program
                 .DefaultValue(defaultOut));
         var outputDir = CleanInputPath(outputRaw);
 
-        // Architecture selection
+        // Architecture selection for split archives
         Architecture? preferredArch = null;
         if (PackageExtractor.IsArchive(inputPath))
         {
@@ -132,7 +158,7 @@ public static class Program
             ExportFridaScripts = choices.Any(c => c.StartsWith("Frida"))
         };
 
-        return ExecuteDumper(inputPath, outputDir, null, preferredArch, options);
+        return ExecuteDumper(inputPath, outputDir, metadataPath, preferredArch, options, isInteractive: true);
     }
 
     private static int RunCommandLine(string[] args)
@@ -156,6 +182,7 @@ public static class Program
         };
 
         var hasSpecificExport = false;
+        var positionalArgs = new List<string>();
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -221,15 +248,33 @@ public static class Program
                 options.ExportFridaScripts = true;
                 hasSpecificExport = true;
             }
-            else if (!arg.StartsWith('-') && inputPath == null)
+            else if (!arg.StartsWith('-'))
             {
-                inputPath = CleanInputPath(arg);
+                positionalArgs.Add(CleanInputPath(arg));
+            }
+        }
+
+        // Positional argument binding:
+        // 1 arg:  <input>
+        // 2 args: <binary> <metadata>
+        // 3 args: <binary> <metadata> <output>
+        if (inputPath == null && positionalArgs.Count > 0)
+        {
+            inputPath = positionalArgs[0];
+            if (positionalArgs.Count > 1 && metadataPath == null)
+            {
+                metadataPath = positionalArgs[1];
+            }
+            if (positionalArgs.Count > 2 && outputDir == null)
+            {
+                outputDir = positionalArgs[2];
             }
         }
 
         if (string.IsNullOrEmpty(inputPath))
         {
-            AnsiConsole.MarkupLine("[bold red]Error:[/] No input specified. Use -i <path> or run without arguments for interactive mode.");
+            AnsiConsole.MarkupLine("[bold red]Error:[/] No input specified. Drag-and-drop a file or use: il2cpp-dumper <input>");
+            PrintHelp();
             return 1;
         }
 
@@ -240,7 +285,10 @@ public static class Program
             options = ExportOptions.All;
         }
 
-        return ExecuteDumper(inputPath, outputDir, metadataPath, preferredArch, options, unityVersion);
+        // If invoked via single-argument drag-and-drop in Windows Explorer, pause before closing window
+        var isDragAndDrop = args.Length == 1 && !args[0].StartsWith('-');
+
+        return ExecuteDumper(inputPath, outputDir, metadataPath, preferredArch, options, unityVersion, isDragAndDrop);
     }
 
     private static int ExecuteDumper(
@@ -249,7 +297,8 @@ public static class Program
         string? metadataPath,
         Architecture? preferredArch,
         ExportOptions options,
-        string? unityVersion = null)
+        string? unityVersion = null,
+        bool isInteractive = false)
     {
         DumpResult? result = null;
 
@@ -264,13 +313,23 @@ public static class Program
                     preferredArch,
                     options,
                     unityVersion,
-                    msg => AnsiConsole.MarkupLine($"[grey][[[/][blue]{DateTime.Now:HH:mm:ss}[/][grey]]][/] {Markup.Escape(msg)}"));
+                    msg =>
+                    {
+                        ctx.Status($"[bold cyan]{Markup.Escape(msg)}[/]");
+                        AnsiConsole.MarkupLine($"[grey][[[/][blue]{DateTime.Now:HH:mm:ss}[/][grey]]][/] {Markup.Escape(msg)}");
+                    });
             });
 
         if (result == null || !result.Success)
         {
             AnsiConsole.WriteLine();
             AnsiConsole.MarkupLine($"[bold red]Dumper failed:[/] {Markup.Escape(result?.ErrorMessage ?? "Unknown error")}");
+
+            if (isInteractive && !Console.IsInputRedirected)
+            {
+                AnsiConsole.MarkupLine("[grey]Press any key to exit...[/]");
+                try { Console.ReadKey(true); } catch { }
+            }
             return 1;
         }
 
@@ -301,13 +360,53 @@ public static class Program
         AnsiConsole.Write(table);
 
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"[bold green]Success![/] All requested files generated in: [cyan]{result.OutputDirectory}[/]");
+        AnsiConsole.MarkupLine($"[bold green]Success![/] All files generated in: [cyan]{result.OutputDirectory}[/]");
+
+        if (isInteractive && !Console.IsInputRedirected && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            AnsiConsole.WriteLine();
+            if (AnsiConsole.Confirm("Open output folder in File Explorer?", defaultValue: true))
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = result.OutputDirectory,
+                        UseShellExecute = true
+                    });
+                }
+                catch
+                {
+                    // Ignore explorer open failure
+                }
+            }
+        }
+
+        if (isInteractive && !Console.IsInputRedirected)
+        {
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("[grey]Press any key to exit...[/]");
+            try { Console.ReadKey(true); } catch { }
+        }
+
         return 0;
     }
 
     private static string CleanInputPath(string raw)
     {
-        var cleaned = raw.Trim().Trim('"', '\'');
+        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+
+        var cleaned = raw.Trim();
+
+        // Handle PowerShell drag-and-drop prefix: & '...'
+        if (cleaned.StartsWith('&'))
+        {
+            cleaned = cleaned[1..].Trim();
+        }
+
+        // Strip single and double quotes added by Windows drag-and-drop
+        cleaned = cleaned.Trim('"', '\'');
+
         return Path.GetFullPath(cleaned);
     }
 }

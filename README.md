@@ -60,19 +60,24 @@ dotnet run --project src/Il2CppDumper.Cli
 ```
 You will be prompted to drag-and-drop your target file or folder, select the target architecture, and choose which outputs to generate.
 
-### 2. Command Line (CI/CD & Scripting)
+### 2. Command Line
+
+Positional syntax (no flags required):
 ```bash
-# Dump everything from an APK
-il2cpp-dumper -i game.apk -o ./output --all
+# Dump from a game directory or mobile package directly:
+il2cpp-dumper "C:/Games/MyGame"
+il2cpp-dumper game.apk
 
-# Specify preferred architecture (arm64, arm, x64, x86)
+# Pair binary and metadata directly:
+il2cpp-dumper GameAssembly.dll global-metadata.dat
+il2cpp-dumper GameAssembly.dll global-metadata.dat ./custom_output
+```
+
+Flag syntax (for CI/CD and automation):
+```bash
+# Specify target architecture or selective exports:
 il2cpp-dumper -i game.xapk -a arm64 -o ./output --all
-
-# Dump from PC Unity game folder
-il2cpp-dumper -i "C:/Games/MyGame" -o ./dump --all
-
-# Dump directly from extracted binary and metadata
-il2cpp-dumper -i libil2cpp.so -m global-metadata.dat -o ./dump --dump-cs --dummy
+il2cpp-dumper -i "C:/Games/MyGame" --dummy --cpp
 ```
 
 ### CLI Options
