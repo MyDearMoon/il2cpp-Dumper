@@ -34,13 +34,15 @@ Supports:
 
 For a detailed technical breakdown of why certain games fail static dumps and how to work with them, see [COMPATIBILITY.md](COMPATIBILITY.md).
 
+## Download
+
+Pre-compiled standalone binaries are available on the [Releases](https://github.com/MyDearMoon/il2cpp-Dumper/releases) page for Windows, Linux, and macOS. No .NET runtime or SDK installation is required when using pre-built binaries.
+
 ---
 
-## Installation & Requirements
+## Building from Source
 
-- [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) or higher.
-
-### Build from Source
+Requirements: [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) or higher.
 ```bash
 git clone https://github.com/MyDearMoon/il2cpp-Dumper.git
 cd il2cpp-Dumper

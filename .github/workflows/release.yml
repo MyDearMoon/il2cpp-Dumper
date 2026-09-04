@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Verify Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Run Tests
+        run: dotnet test Il2CppDumper.slnx -c Release
+
+  build-release:
+    name: Build (${{ matrix.rid }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            os: windows-latest
+            artifact_name: Il2CppDumper-win-x64.zip
+          - rid: win-arm64
+            os: windows-latest
+            artifact_name: Il2CppDumper-win-arm64.zip
+          - rid: linux-x64
+            os: ubuntu-latest
+            artifact_name: Il2CppDumper-linux-x64.tar.gz
+          - rid: linux-arm64
+            os: ubuntu-latest
+            artifact_name: Il2CppDumper-linux-arm64.tar.gz
+          - rid: osx-x64
+            os: macos-13
+            artifact_name: Il2CppDumper-osx-x64.tar.gz
+          - rid: osx-arm64
+            os: macos-latest
+            artifact_name: Il2CppDumper-osx-arm64.tar.gz
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Publish Single-File Executable
+        shell: bash
+        run: |
+          dotnet publish src/Il2CppDumper.Cli/Il2CppDumper.Cli.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:EnableCompressionInSingleFile=true \
+            -o ./out
+
+      - name: Package Windows Binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path ./out/Il2CppDumper.exe -DestinationPath ./${{ matrix.artifact_name }}
+
+      - name: Package Unix Binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          chmod +x ./out/Il2CppDumper
+          tar -czf ./${{ matrix.artifact_name }} -C ./out Il2CppDumper
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: ./${{ matrix.artifact_name }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./artifacts/*
+          generate_release_notes: true
