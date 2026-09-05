@@ -2,6 +2,7 @@ using System.Diagnostics;
 using AssetRipper.Primitives;
 using Il2CppDumper.Core.Containers;
 using Il2CppDumper.Core.Exporters;
+using Il2CppDumper.Core.Metadata.Moonton;
 using Il2CppDumper.Core.Model;
 using Il2CppDumper.Core.Runtime;
 using LibCpp2IL;
@@ -49,30 +50,38 @@ public static class Il2CppDumperEngine
             // Validate metadata header magic (detect encryption / anti-tamper)
             ValidateMetadataHeader(extractionCtx.MetadataPath);
 
-            // 2. Load with LibCpp2IL
-            logger?.Invoke("Parsing binary structures and global-metadata.dat...");
-            
-            // Auto-detect or default unity version
-            var unityVersion = default(UnityVersion);
-            if (!string.IsNullOrEmpty(unityVersionOverride) && UnityVersionDetector.TryParseVersion(unityVersionOverride, out var parsedVer))
+            DumpContext dumpContext;
+            if (MoontonDumper.IsMoontonMetadata(extractionCtx.MetadataPath))
             {
-                unityVersion = parsedVer;
-                logger?.Invoke($"Using specified Unity version: {unityVersion}");
+                dumpContext = MoontonDumper.Dump(extractionCtx.MetadataPath, extractionCtx.BinaryPath, logger);
             }
             else
             {
-                unityVersion = UnityVersionDetector.Detect(inputPath, extractionCtx.BinaryPath, extractionCtx.MetadataPath, logger);
+                // 2. Load with LibCpp2IL
+                logger?.Invoke("Parsing binary structures and global-metadata.dat...");
+                
+                // Auto-detect or default unity version
+                var unityVersion = default(UnityVersion);
+                if (!string.IsNullOrEmpty(unityVersionOverride) && UnityVersionDetector.TryParseVersion(unityVersionOverride, out var parsedVer))
+                {
+                    unityVersion = parsedVer;
+                    logger?.Invoke($"Using specified Unity version: {unityVersion}");
+                }
+                else
+                {
+                    unityVersion = UnityVersionDetector.Detect(inputPath, extractionCtx.BinaryPath, extractionCtx.MetadataPath, logger);
+                }
+
+                var cppContext = LibCpp2IlMain.LoadFromFileAsContext(extractionCtx.BinaryPath, extractionCtx.MetadataPath, unityVersion);
+
+                if (cppContext == null)
+                {
+                    throw new InvalidOperationException("Failed to initialize LibCpp2IL context from provided files.");
+                }
+
+                // 3. Build Unified Object Model
+                dumpContext = DumpModelBuilder.Build(cppContext, extractionCtx.Architecture, extractionCtx.Format, logger);
             }
-
-            var cppContext = LibCpp2IlMain.LoadFromFileAsContext(extractionCtx.BinaryPath, extractionCtx.MetadataPath, unityVersion);
-
-            if (cppContext == null)
-            {
-                throw new InvalidOperationException("Failed to initialize LibCpp2IL context from provided files.");
-            }
-
-            // 3. Build Unified Object Model
-            var dumpContext = DumpModelBuilder.Build(cppContext, extractionCtx.Architecture, extractionCtx.Format, logger);
             result.Context = dumpContext;
 
             // 4. Run Exporters
@@ -85,7 +94,14 @@ public static class Il2CppDumperEngine
             scriptExporter.Export(dumpContext, outputDirectory, options, logger);
 
             var dummyExporter = new DummyAssemblyExporter();
-            dummyExporter.Export(dumpContext, outputDirectory, options, logger);
+            try
+            {
+                dummyExporter.Export(dumpContext, outputDirectory, options, logger);
+            }
+            catch (Exception ex)
+            {
+                logger?.Invoke($"[Warning] Dummy assembly generation skipped: {ex.Message}");
+            }
 
             var cppSdkExporter = new CppSdkExporter();
             cppSdkExporter.Export(dumpContext, outputDirectory, options, logger);
