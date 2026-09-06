@@ -2,6 +2,7 @@ using System.Diagnostics;
 using AssetRipper.Primitives;
 using Il2CppDumper.Core.Containers;
 using Il2CppDumper.Core.Exporters;
+using Il2CppDumper.Core.Metadata;
 using Il2CppDumper.Core.Metadata.Moonton;
 using Il2CppDumper.Core.Model;
 using Il2CppDumper.Core.Runtime;
@@ -45,6 +46,9 @@ public static class Il2CppDumperEngine
             // 1. Container Ingestion & File Extraction
             extractionCtx = PackageExtractor.Ingest(inputPath, metadataOverride, preferredArch, logger);
             logger?.Invoke($"Target binary: {extractionCtx.BinaryPath} ({extractionCtx.Architecture})");
+
+            // Normalize metadata (auto-detect and unwrap envelope/pre-header if present)
+            extractionCtx.MetadataPath = MetadataNormalizer.Normalize(extractionCtx.MetadataPath, extractionCtx.TempDirectory, logger);
             logger?.Invoke($"Target metadata: {extractionCtx.MetadataPath}");
 
             // Validate metadata header magic (detect encryption / anti-tamper)
@@ -57,9 +61,6 @@ public static class Il2CppDumperEngine
             }
             else
             {
-                // 2. Load with LibCpp2IL
-                logger?.Invoke("Parsing binary structures and global-metadata.dat...");
-                
                 // Auto-detect or default unity version
                 var unityVersion = default(UnityVersion);
                 if (!string.IsNullOrEmpty(unityVersionOverride) && UnityVersionDetector.TryParseVersion(unityVersionOverride, out var parsedVer))
@@ -72,15 +73,25 @@ public static class Il2CppDumperEngine
                     unityVersion = UnityVersionDetector.Detect(inputPath, extractionCtx.BinaryPath, extractionCtx.MetadataPath, logger);
                 }
 
-                var cppContext = LibCpp2IlMain.LoadFromFileAsContext(extractionCtx.BinaryPath, extractionCtx.MetadataPath, unityVersion);
-
-                if (cppContext == null)
+                try
                 {
-                    throw new InvalidOperationException("Failed to initialize LibCpp2IL context from provided files.");
-                }
+                    logger?.Invoke("Parsing binary structures and global-metadata.dat...");
+                    var cppContext = LibCpp2IlMain.LoadFromFileAsContext(extractionCtx.BinaryPath, extractionCtx.MetadataPath, unityVersion);
 
-                // 3. Build Unified Object Model
-                dumpContext = DumpModelBuilder.Build(cppContext, extractionCtx.Architecture, extractionCtx.Format, logger);
+                    if (cppContext == null)
+                    {
+                        throw new InvalidOperationException("Failed to initialize LibCpp2IL context from provided files.");
+                    }
+
+                    // 3. Build Unified Object Model
+                    dumpContext = DumpModelBuilder.Build(cppContext, extractionCtx.Architecture, extractionCtx.Format, logger);
+                }
+                catch (Exception ex)
+                {
+                    logger?.Invoke($"[Warning] Binary structure analysis encountered an issue: {ex.Message}");
+                    logger?.Invoke("Switching to Metadata Fallback mode (reconstructing all assemblies, types, methods, fields, and strings directly from global-metadata.dat)...");
+                    dumpContext = MetadataOnlyDumper.Dump(extractionCtx.MetadataPath, extractionCtx.BinaryPath, unityVersion, logger);
+                }
             }
             result.Context = dumpContext;
 

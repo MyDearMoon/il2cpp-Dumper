@@ -1,4 +1,4 @@
-## Build results
+## Build results & Caches
 [Dd]ebug/
 [Dd]ebugPublic/
 [Rr]elease/
@@ -12,28 +12,46 @@ bld/
 [Oo]bj/
 [Ll]og/
 [Ll]ogs/
+.dotnet/
 
-## Visual Studio
+## Visual Studio & IDEs
 .vs/
+.idea/
+.vscode/
 *.user
 *.suo
+*.userosscache
+*.sln.docstates
+*.rsuser
 
 ## Test results
 TestResults/
 [Tt]est[Rr]esult*/
 
-## User-specific files
-*.rsuser
-*.suo
-*.user
-*.userosscache
-*.sln.docstates
-
-## Dump output
-dump/
-output/
-mlbb_dump/
+## Dump outputs & Game artifacts
+[Dd]ump/
+[Dd]umps/
+[Oo]utput/
+[Oo]utputs/
+*_dump/
+*_dumps/
 test_dump_*/
 build/
 publish/
+DummyDll/
+cpp-sdk/
+frida-runtime-dumper/
 
+## Game binary and metadata files
+*.apk
+*.xapk
+*.apks
+*.so
+*.dat
+*.dex
+dump.cs
+script.json
+stringliteral.json
+ida.py
+ghidra.py
+binja.py
