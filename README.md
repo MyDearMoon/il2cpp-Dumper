@@ -22,6 +22,8 @@ Supports Windows (PE), Android (ELF: APK, XAPK, APKM, Split Bundles), and iOS (M
 | **Partitioned Metadata** | *Mobile Legends: Bang Bang (MLBB)* | Supported | Native Moonton partitioned metadata adapter |
 | **Metadata-Only Fallback** | *Fate/Grand Order*, *Subway Surfers*, *Among Us*, *Azur Lane* | Supported | Automatic recovery when binary pointer scanning fails |
 | **Envelope / Prefixed Headers** | *Honor of Kings (HOK)* | Supported | Automatic pre-header offset scanning and unwrapping |
+| **Tampered / Zeroed Magic** | Custom / Packed Unity games | Supported | Automatic structural header recovery and magic restoration |
+| **XOR Obfuscated Metadata** | Lightly protected / packed games | Supported | Automatic 1-byte and 4-byte repeating XOR detection & decryption |
 | **Split App Bundles** | *Among Us*, *Endfield*, *Subway Surfers* | Supported | Automatic `.xapk` / `.apkm` and split APK directory ingestion |
 | **Obfuscated IL2CPP** | *Goose Goose Duck*, *Gorilla Tag* | Supported | Automatic identifier sanitization |
 | **Unity Mono** | *Risk of Rain 2*, *Lethal Company*, *Valheim*, *Muck* | N/A | No dump needed; inspect DLLs directly in dnSpy |
@@ -69,7 +71,10 @@ Il2CppDumper libil2cpp.so global-metadata.dat ./custom_output
 | `-m, --metadata <path>` | Path to `global-metadata.dat` (if stored elsewhere) |
 | `-o, --output <path>` | Output destination folder (defaults to `./dump`) |
 | `-a, --arch <name>` | Target architecture (`arm64`, `armv7`, `x64`, `x86`) |
-| `--unity-version <ver>` | Explicit Unity version override (e.g. `2022.3.62f2`) |
+| `-u, --unity <version>` | Explicit Unity version override (e.g. `2022.3.62f2`) |
+| `--ignore-magic` | Bypass magic requirement and recover structurally valid metadata |
+| `--magic <val>` | Custom expected metadata magic (hex e.g. `0x12345678` or decimal) |
+| `--scan-depth <size>` | Scan depth for metadata envelope search (default: 4096, e.g. `64KB`, `1MB`, `0` for all) |
 | `--all` | Export all components (default) |
 | `--dump-cs` / `--dummy` / `--cpp` | Select specific export components |
 | `--no-open` | Suppress automatically opening output directory in File Explorer |

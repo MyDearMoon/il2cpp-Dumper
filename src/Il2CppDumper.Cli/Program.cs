@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Il2CppDumper.Core;
 using Il2CppDumper.Core.Containers;
 using Il2CppDumper.Core.Exporters;
+using Il2CppDumper.Core.Metadata;
 using Spectre.Console;
 using Architecture = Il2CppDumper.Core.Containers.Architecture;
 
@@ -59,6 +60,9 @@ public static class Program
         table.AddRow("-o, --output <path>", "Output directory (defaults to './dump')");
         table.AddRow("-a, --arch <name>", "Preferred architecture: arm64, armv7, x64, x86");
         table.AddRow("-u, --unity <version>", "Override detected Unity version (e.g. 2021.3.56)");
+        table.AddRow("--ignore-magic", "Bypass magic requirement and recover structurally valid metadata");
+        table.AddRow("--magic <val>", "Custom expected metadata magic (hex e.g. 0x12345678 or decimal)");
+        table.AddRow("--scan-depth <size>", "Scan depth for metadata envelope search (default 4096, e.g. 64KB, 1MB, 0 for all)");
         table.AddRow("--all", "Export all formats (dump.cs, scripts, dummy DLLs, C++ SDK, Frida) [Default]");
         table.AddRow("--dump-cs", "Export dump.cs and script.json only");
         table.AddRow("--scripts", "Export IDA Pro, Ghidra, and Binary Ninja Python scripts");
@@ -182,6 +186,7 @@ public static class Program
         };
 
         var hasSpecificExport = false;
+        var recoveryOptions = new MetadataRecoveryOptions();
         var positionalArgs = new List<string>();
 
         for (var i = 0; i < args.Length; i++)
@@ -214,6 +219,42 @@ public static class Program
                     "x86" => Architecture.X86,
                     _ => null
                 };
+            }
+            else if (arg == "--ignore-magic")
+            {
+                recoveryOptions.IgnoreMagic = true;
+            }
+            else if (arg == "--magic" && i + 1 < args.Length)
+            {
+                var magicStr = args[++i].Trim();
+                if (magicStr.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                {
+                    recoveryOptions.CustomMagic = Convert.ToUInt32(magicStr[2..], 16);
+                }
+                else if (uint.TryParse(magicStr, out var mVal))
+                {
+                    recoveryOptions.CustomMagic = mVal;
+                }
+            }
+            else if (arg == "--scan-depth" && i + 1 < args.Length)
+            {
+                var depthStr = args[++i].Trim().ToUpperInvariant();
+                if (depthStr is "ALL" or "0")
+                {
+                    recoveryOptions.ScanDepth = 0;
+                }
+                else if (depthStr.EndsWith("MB") && int.TryParse(depthStr[..^2], out var mb))
+                {
+                    recoveryOptions.ScanDepth = mb * 1024 * 1024;
+                }
+                else if (depthStr.EndsWith("KB") && int.TryParse(depthStr[..^2], out var kb))
+                {
+                    recoveryOptions.ScanDepth = kb * 1024;
+                }
+                else if (int.TryParse(depthStr, out var rawDepth))
+                {
+                    recoveryOptions.ScanDepth = rawDepth;
+                }
             }
             else if (arg == "--all")
             {
@@ -288,7 +329,7 @@ public static class Program
         // If invoked via single-argument drag-and-drop in Windows Explorer, pause before closing window
         var isDragAndDrop = args.Length == 1 && !args[0].StartsWith('-');
 
-        return ExecuteDumper(inputPath, outputDir, metadataPath, preferredArch, options, unityVersion, isDragAndDrop);
+        return ExecuteDumper(inputPath, outputDir, metadataPath, preferredArch, options, unityVersion, recoveryOptions, isDragAndDrop);
     }
 
     private static int ExecuteDumper(
@@ -298,6 +339,7 @@ public static class Program
         Architecture? preferredArch,
         ExportOptions options,
         string? unityVersion = null,
+        MetadataRecoveryOptions? recoveryOptions = null,
         bool isInteractive = false)
     {
         DumpResult? result = null;
@@ -313,6 +355,7 @@ public static class Program
                     preferredArch,
                     options,
                     unityVersion,
+                    recoveryOptions,
                     msg =>
                     {
                         ctx.Status($"[bold cyan]{Markup.Escape(msg)}[/]");
@@ -339,6 +382,15 @@ public static class Program
         table.Title("[bold green]Dumping Pipeline Complete[/]");
         table.AddColumn("[bold]Metric[/]");
         table.AddColumn("[bold]Value[/]");
+
+        if (result.RecoveryResult != null && result.RecoveryResult.Method != MetadataRecoveryMethod.Standard)
+        {
+            table.AddRow("Metadata Recovery", $"{result.RecoveryResult.Method} (Confidence: {result.RecoveryResult.ConfidenceScore}%)");
+            if (result.RecoveryResult.XorKey != null)
+            {
+                table.AddRow("Recovery XOR Key", BitConverter.ToString(result.RecoveryResult.XorKey));
+            }
+        }
 
         if (result.Context != null)
         {

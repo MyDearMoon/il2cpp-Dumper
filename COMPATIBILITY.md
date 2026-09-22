@@ -63,11 +63,38 @@ The genuine metadata tables are descrambled and reconstructed in process memory 
 
 Certain mobile titles (such as *Honor of Kings*) wrap the standard metadata inside a custom container or prepend an 8- to 32-byte header containing file sizes, bundle checksums, or proprietary wrapper tags before the IL2CPP magic number `0xFAB11BAF`.
 
-**Status:** Handled automatically. The built-in `MetadataNormalizer` scans the first 4 KB of the file for the IL2CPP magic bytes and unwraps the valid metadata payload transparently without requiring manual hex editing.
+**Status:** Handled automatically. The built-in `MetadataRecoveryEngine` scans the file for candidate IL2CPP magic bytes, structurally validates the candidate header at that offset, and unwraps the payload transparently.
+- Default scan depth is 4 KB (`4096` bytes).
+- Configurable via `--scan-depth <size>` (e.g. `--scan-depth 64KB`, `--scan-depth 1MB`, or `--scan-depth 0` / `all` for whole-file search).
 
 ---
 
-### 4. Moonton Partitioned Metadata
+### 4. Tampered & Zeroed Magic (Anti-Dump Evasion)
+
+Some game protectors and custom packers alter or zero out the 4-byte magic word (`00 00 00 00` or custom uint32 values like `0x12345678`) at offset 0 while leaving the rest of the metadata structure completely intact.
+
+**Status:** Handled automatically.
+- When `--ignore-magic` is passed, or when zeroed/known custom magic signatures are detected, the dumper performs structural validation of the header:
+  - Validates IL2CPP version plausibility (recognized: v16–v31, v1024 HybridCLR; plausible: v1–v100).
+  - Validates 64-bit safe bounds for section offsets and sizes to prevent integer overflow.
+  - Verifies key section offsets (`stringOffset`, `typeDefinitionsOffset`, `methodsOffset`) and string table readability.
+  - Computes a confidence score (0–100). If confidence >= 70%, the metadata is recovered and the canonical magic `0xFAB11BAF` is restored in a temporary normalized payload so downstream parsers execute without crashing.
+- Custom magic values can also be explicitly targeted using `--magic <val>` (hex e.g. `0x12345678` or decimal).
+
+---
+
+### 5. XOR Obfuscated Metadata (1-Byte & 4-Byte Repeating Key)
+
+Certain lightweight protectors apply a 1-byte or 4-byte repeating XOR mask across `global-metadata.dat` to prevent automated dumpers from locating the magic word.
+
+**Status:** Handled automatically.
+- **1-Byte XOR**: The engine tests derived candidates (`k = byte[0] ^ 0xAF`) and falls back to testing all 255 byte keys against structural validation.
+- **4-Byte XOR**: The engine derives the key `K = magic ^ 0xFAB11BAF`, decrypts test headers, and evaluates structural confidence.
+- When a valid key is confirmed (confidence >= 70%), the entire metadata file is streamed through hardware-efficient XOR decryption into a temporary file with canonical headers restored.
+
+---
+
+### 6. Moonton Partitioned Metadata
 
 Moonton games (such as *Mobile Legends: Bang Bang*) split the metadata across separate files under `base_assets/assets/bin/Data/Managed/Metadata/`:
 - `metadata.dat`: Contains type definitions, methods, fields, and properties.
@@ -77,7 +104,7 @@ Moonton games (such as *Mobile Legends: Bang Bang*) split the metadata across se
 
 ---
 
-### 5. Metadata-Only Fallback Engine
+### 7. Metadata-Only Fallback Engine
 
 In Unity 2022.3+ 64-bit ARM (`arm64-v8a`) binaries (such as *Fate/Grand Order*, *Azur Lane*, *Subway Surfers*, and *Among Us*), static pointer table scanning in disassembler engines can encounter generic method pointer struct offsets that lie beyond the mapped stream length.
 
@@ -88,7 +115,7 @@ When pointer reading from the native binary encounters misalignment:
 
 ---
 
-### 6. Split Android App Bundles (.xapk / .apkm / Directories)
+### 8. Split Android App Bundles (.xapk / .apkm / Directories)
 
 Modern Android app stores distribute titles as split APK bundles:
 - `base.apk`: Contains resources and `assets/bin/Data/Managed/Metadata/global-metadata.dat`.
@@ -98,7 +125,7 @@ Modern Android app stores distribute titles as split APK bundles:
 
 ---
 
-### 7. Unity Mono Games (Not IL2CPP)
+### 9. Unity Mono Games (Not IL2CPP)
 
 Games like *Risk of Rain 2*, *People Playground*, *Muck*, *Lethal Company*, *Valheim*, and *Phasmophobia* use Unity's Mono scripting backend instead of IL2CPP. These games do not contain a `GameAssembly.dll` or `global-metadata.dat`.
 
@@ -113,7 +140,7 @@ Games like *Risk of Rain 2*, *People Playground*, *Muck*, *Lethal Company*, *Val
 
 ---
 
-### 8. Obfuscated Identifiers (Beebyte, Babel)
+### 10. Obfuscated Identifiers (Beebyte, Babel)
 
 Games like *Goose Goose Duck* and *Crab Game* run obfuscators prior to IL2CPP compilation. Type, method, and field names may contain invalid identifier characters, control characters, or Unicode homoglyphs.
 
@@ -134,8 +161,12 @@ $fs.Close()
 ```
 
 - **Starts with `AF-1B-B1-FA`**: Standard unencrypted metadata. Ready for direct static dumping.
-- **Contains `AF-1B-B1-FA` at an offset within 4 KB**: Enveloped or prefixed metadata (e.g. *Honor of Kings*). Automatically detected and unwrapped by `MetadataNormalizer`.
+- **Contains `AF-1B-B1-FA` at an offset within scan depth**: Enveloped or prefixed metadata (e.g. *Honor of Kings*). Automatically detected and unwrapped.
+- **Starts with `00-00-00-00`**: Zeroed magic anti-dump protection. Automatically detected and recovered via structural validation.
+- **Starts with `FA-B1-1B-AF`**: Byte-swapped (big-endian) metadata. Reported with endianness diagnostic.
+- **XOR-masked bytes**: Automatically detected and decrypted if 1-byte or 4-byte repeating XOR was applied.
 - **Starts with `4D-48-59-00`**: HoYoverse encryption (`MHY\0`). Requires runtime RAM dump.
 - **Starts with `17-84-7D-7E`**: VRChat encryption (`0x7E7D8417`). Requires runtime RAM dump.
 - **Starts with `AF-1B-B1-FA` but fails with astronomical counts or EOF errors**: Anti-cheat table scrambling (e.g. Tencent ACE in *CODM* / *Endfield*). Requires runtime RAM dump.
-- **Custom bytes**: Proprietary encryption or packing. Requires runtime RAM dump.
+- **Custom bytes**: Pass `--ignore-magic` or `--magic <val>` to attempt structural recovery. If proprietary encryption is used, a runtime RAM dump is required.
+

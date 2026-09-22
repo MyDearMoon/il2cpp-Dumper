@@ -16,6 +16,7 @@ public sealed class DumpResult
     public string? ErrorMessage { get; set; }
     public TimeSpan Elapsed { get; set; }
     public DumpContext? Context { get; set; }
+    public MetadataRecoveryResult? RecoveryResult { get; set; }
     public string OutputDirectory { get; set; } = string.Empty;
     public List<string> GeneratedFiles { get; set; } = new();
 }
@@ -29,9 +30,11 @@ public static class Il2CppDumperEngine
         Architecture? preferredArch = null,
         ExportOptions? options = null,
         string? unityVersionOverride = null,
+        MetadataRecoveryOptions? recoveryOptions = null,
         Action<string>? logger = null)
     {
         options ??= ExportOptions.All;
+        recoveryOptions ??= new MetadataRecoveryOptions();
         var sw = Stopwatch.StartNew();
         var result = new DumpResult
         {
@@ -47,12 +50,22 @@ public static class Il2CppDumperEngine
             extractionCtx = PackageExtractor.Ingest(inputPath, metadataOverride, preferredArch, logger);
             logger?.Invoke($"Target binary: {extractionCtx.BinaryPath} ({extractionCtx.Architecture})");
 
-            // Normalize metadata (auto-detect and unwrap envelope/pre-header if present)
-            extractionCtx.MetadataPath = MetadataNormalizer.Normalize(extractionCtx.MetadataPath, extractionCtx.TempDirectory, logger);
+            // Normalize and recover metadata (auto-detect envelope, tampered magic, XOR obfuscation)
+            var recovery = MetadataNormalizer.Normalize(extractionCtx.MetadataPath, recoveryOptions, extractionCtx.TempDirectory, logger);
+            result.RecoveryResult = recovery;
+
+            if (!recovery.Success)
+            {
+                throw new InvalidOperationException(recovery.Diagnostic ?? "Metadata normalization and recovery failed.");
+            }
+
+            extractionCtx.MetadataPath = recovery.ResultPath;
             logger?.Invoke($"Target metadata: {extractionCtx.MetadataPath}");
 
-            // Validate metadata header magic (detect encryption / anti-tamper)
-            ValidateMetadataHeader(extractionCtx.MetadataPath);
+            if (recovery.Method != MetadataRecoveryMethod.Standard)
+            {
+                logger?.Invoke($"[Recovery] Recovered metadata via {recovery.Method} (Version: {recovery.Version}, Confidence: {recovery.ConfidenceScore}%)");
+            }
 
             DumpContext dumpContext;
             if (MoontonDumper.IsMoontonMetadata(extractionCtx.MetadataPath))
@@ -146,30 +159,6 @@ public static class Il2CppDumperEngine
         finally
         {
             extractionCtx?.Dispose();
-        }
-    }
-
-    private static void ValidateMetadataHeader(string metadataPath)
-    {
-        using var fs = File.OpenRead(metadataPath);
-        var buffer = new byte[4];
-        if (fs.Read(buffer, 0, 4) < 4)
-            throw new InvalidDataException("global-metadata.dat is too small or truncated.");
-
-        var magic = BitConverter.ToUInt32(buffer, 0);
-        if (magic != 0xFAB11BAF)
-        {
-            if (buffer[0] == 0x4D && buffer[1] == 0x48 && buffer[2] == 0x59) // "MHY"
-            {
-                throw new InvalidOperationException(
-                    "Detected HoYoverse encrypted metadata (starts with 'MHY\\0')!\n" +
-                    "HoYoverse games (Zenless Zone Zero, Genshin Impact, Honkai: Star Rail) encrypt global-metadata.dat on disk.\n" +
-                    "Static dumpers cannot read disk files directly. You must dump the decrypted global-metadata.dat from memory at runtime.");
-            }
-
-            throw new InvalidOperationException(
-                $"global-metadata.dat is encrypted or obfuscated (Magic: 0x{magic:X8} instead of 0xFAB11BAF).\n" +
-                "Use a runtime memory dumper (or the bundled Frida script) to dump the decrypted metadata from RAM at runtime.");
         }
     }
 }
