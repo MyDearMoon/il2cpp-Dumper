@@ -20,8 +20,8 @@ public class ExporterTests
             Format = BinaryFormat.Elf
         };
 
-        ctx.StringLiterals.Add("Hello World");
-        ctx.StringLiterals.Add("UnityPlayer");
+        ctx.StringLiterals.Add(new StringLiteralModel { Index = 0, Value = "Hello World", Length = 11 });
+        ctx.StringLiterals.Add(new StringLiteralModel { Index = 1, Value = "UnityPlayer", Length = 11 });
 
         var img = new ImageModel { Name = "Assembly-CSharp.dll" };
         var playerType = new TypeModel

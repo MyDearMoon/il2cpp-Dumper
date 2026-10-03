@@ -8,27 +8,43 @@ public sealed class CppSdkExporter : IExporter
 {
     public string Name => "C++ Modding SDK (il2cpp.h & Visual Studio Scaffolding)";
 
-    public void Export(DumpContext context, string outputDirectory, ExportOptions options, Action<string>? logger = null)
+    public ExportResult Export(DumpContext context, string outputDirectory, ExportOptions options, Action<string>? logger = null)
     {
-        if (!options.ExportCppSdk) return;
+        var result = new ExportResult { Name = Name };
+        if (!options.ExportCppSdk) return result;
 
-        var sdkDir = Path.Combine(outputDirectory, "cpp-sdk");
-        Directory.CreateDirectory(sdkDir);
-        logger?.Invoke($"Exporting C++ Modding SDK to: {sdkDir}...");
+        try
+        {
+            var sdkDir = Path.Combine(outputDirectory, "cpp-sdk");
+            Directory.CreateDirectory(sdkDir);
+            logger?.Invoke($"Exporting C++ Modding SDK to: {sdkDir}...");
 
-        // 1. Generate il2cpp.h
-        ExportHeader(context, sdkDir, logger);
+            // 1. Generate il2cpp.h
+            var headerPath = ExportHeader(context, sdkDir, logger);
+            result.GeneratedFiles.Add(headerPath);
 
-        // 2. Generate il2cpp-init.h
-        ExportInitHeader(context, sdkDir, logger);
+            // 2. Generate il2cpp-init.h
+            var initPath = ExportInitHeader(context, sdkDir, logger);
+            result.GeneratedFiles.Add(initPath);
 
-        // 3. Generate sample hooking dllmain.cpp
-        ExportDllMain(context, sdkDir, logger);
+            // 3. Generate sample hooking dllmain.cpp
+            var dllMainPath = ExportDllMain(context, sdkDir, logger);
+            result.GeneratedFiles.Add(dllMainPath);
 
-        logger?.Invoke($"C++ Modding SDK generated in {sdkDir}");
+            result.Success = true;
+            logger?.Invoke($"C++ Modding SDK generated in {sdkDir}");
+        }
+        catch (Exception ex)
+        {
+            result.Success = false;
+            result.Error = ex.Message;
+            logger?.Invoke($"[Error] {Name} export failed: {ex.Message}");
+        }
+
+        return result;
     }
 
-    private static void ExportHeader(DumpContext context, string sdkDir, Action<string>? logger)
+    private static string ExportHeader(DumpContext context, string sdkDir, Action<string>? logger)
     {
         var headerPath = Path.Combine(sdkDir, "il2cpp.h");
         using var writer = new StreamWriter(headerPath, false, Encoding.UTF8);
@@ -42,11 +58,13 @@ public sealed class CppSdkExporter : IExporter
         writer.WriteLine("#include <cstddef>");
         writer.WriteLine();
 
-        // 1. Standard Il2CppObject Header
-        writer.WriteLine("// Base IL2CPP Object header for managed reference types");
+        // 1. Standard Il2Cpp Object Header definition
+        writer.WriteLine("// Base IL2CPP Object Header");
+        writer.WriteLine("struct Il2CppClass;");
+        writer.WriteLine("struct MonitorData;");
         writer.WriteLine("struct Il2CppObject {");
-        writer.WriteLine("    void* klass;   // Il2CppClass*");
-        writer.WriteLine("    void* monitor; // MonitorData*");
+        writer.WriteLine("    Il2CppClass* klass;");
+        writer.WriteLine("    MonitorData* monitor;");
         writer.WriteLine("};");
         writer.WriteLine();
 
@@ -67,12 +85,12 @@ public sealed class CppSdkExporter : IExporter
         var is64Bit = context.Architecture is Architecture.Arm64 or Architecture.X64 or Architecture.Unknown;
         var headerSize = is64Bit ? 0x10 : 0x8;
 
-        // 3. Struct definitions with true memory-aligned layout
+        // 3. Struct definitions with memory-aligned layout and static_asserts
         foreach (var img in context.Images)
         {
-            writer.WriteLine($"// ---------------------------------------------------------------------------");
+            writer.WriteLine("// ---------------------------------------------------------------------------");
             writer.WriteLine($"// Assembly: {img.Name}");
-            writer.WriteLine($"// ---------------------------------------------------------------------------");
+            writer.WriteLine("// ---------------------------------------------------------------------------");
 
             foreach (var type in img.Types)
             {
@@ -99,28 +117,30 @@ public sealed class CppSdkExporter : IExporter
                     writer.WriteLine($"struct {cppName} : public Il2CppObject {{");
                 }
 
-                // Layout non-static instance fields by memory offset
+                var currentOffset = type.IsValueType ? 0 : headerSize;
                 var instanceFields = type.Fields
-                    .Where(f => !f.IsStatic && f.Offset >= 0)
+                    .Where(f => !f.IsStatic && !f.IsConst)
                     .OrderBy(f => f.Offset)
                     .ToList();
-
-                var currentOffset = type.IsValueType ? 0 : headerSize;
 
                 for (var i = 0; i < instanceFields.Count; i++)
                 {
                     var field = instanceFields[i];
                     var fieldName = SanitizeCpp(field.Name);
 
-                    // Insert gap padding if needed
+                    if (field.Offset < 0 || field.AddressConfidence == AddressConfidence.Unknown)
+                    {
+                        writer.WriteLine($"    void* {fieldName}; // Offset: UNKNOWN ({field.TypeName})");
+                        continue;
+                    }
+
                     if (field.Offset > currentOffset)
                     {
-                        var padBytes = field.Offset - currentOffset;
-                        writer.WriteLine($"    uint8_t _pad_0x{currentOffset:X}[0x{padBytes:X}];");
+                        var pad = field.Offset - currentOffset;
+                        writer.WriteLine($"    uint8_t _pad_0x{currentOffset:X}[0x{pad:X}];");
                         currentOffset = field.Offset;
                     }
 
-                    // Next field offset for sizing unknown types
                     var nextOffset = (i + 1 < instanceFields.Count) ? instanceFields[i + 1].Offset : -1;
                     var (cppType, typeSize) = MapCppType(field.TypeName, is64Bit);
 
@@ -137,7 +157,6 @@ public sealed class CppSdkExporter : IExporter
                     }
                     else
                     {
-                        // Fallback pointer size for last/unbounded field
                         var fallbackSize = is64Bit ? 8 : 4;
                         writer.WriteLine($"    void* {fieldName}; // Offset: 0x{field.Offset:X} ({field.TypeName})");
                         currentOffset += fallbackSize;
@@ -146,13 +165,23 @@ public sealed class CppSdkExporter : IExporter
 
                 writer.WriteLine("};");
                 writer.WriteLine("#pragma pack(pop)");
+
+                // Compile-time offset validation (Part 22)
+                foreach (var field in instanceFields.Where(f => f.Offset >= 0 && f.AddressConfidence != AddressConfidence.Unknown))
+                {
+                    var fName = SanitizeCpp(field.Name);
+                    writer.WriteLine($"static_assert(offsetof({cppName}, {fName}) == 0x{field.Offset:X}, \"Offset of {fName} mismatch in {cppName}\");");
+                }
                 writer.WriteLine();
 
-                // Method function pointer typedefs with concrete parameter and return types
+                // Method function pointer typedefs with unique stable hash suffix (Part 22)
                 foreach (var m in type.Methods)
                 {
-                    if (m.Rva == 0) continue;
-                    var typedefName = $"{cppName}_{SanitizeCpp(m.Name)}_t";
+                    if (m.Rva == 0 || m.AddressConfidence == AddressConfidence.Unknown) continue;
+
+                    var paramTypes = string.Join(",", m.Parameters.Select(p => p.TypeName));
+                    var hashVal = ((uint)paramTypes.GetHashCode() & 0xFFFFFF).ToString("X6");
+                    var typedefName = $"{cppName}_{SanitizeCpp(m.Name)}_{hashVal}_t";
                     var retType = MapCppType(m.ReturnType, is64Bit).CppType;
 
                     var paramList = $"{cppName}* __this";
@@ -175,6 +204,7 @@ public sealed class CppSdkExporter : IExporter
         }
 
         logger?.Invoke($"Wrote: {headerPath}");
+        return headerPath;
     }
 
     private static (string CppType, int Size) MapCppType(string? csharpType, bool is64Bit)
@@ -206,16 +236,17 @@ public sealed class CppSdkExporter : IExporter
             "string" or "System.String" => ("void*", ptrSize),
             "object" or "System.Object" => ("void*", ptrSize),
             "IntPtr" or "System.IntPtr" => ("void*", ptrSize),
-            "UIntPtr" or "System.UIntPtr" => ("uintptr_t", ptrSize),
-            _ => ("void*", -1) // -1 indicates custom/complex type whose size depends on offsets
+            "UIntPtr" or "System.UIntPtr" => ("void*", ptrSize),
+            _ => ("void*", 0)
         };
     }
 
-    private static void ExportInitHeader(DumpContext context, string sdkDir, Action<string>? logger)
+    private static string ExportInitHeader(DumpContext context, string sdkDir, Action<string>? logger)
     {
         var initPath = Path.Combine(sdkDir, "il2cpp-init.h");
         using var writer = new StreamWriter(initPath, false, Encoding.UTF8);
 
+        writer.WriteLine("// Auto-generated runtime address resolver");
         writer.WriteLine("#pragma once");
         writer.WriteLine("#include <cstdint>");
         writer.WriteLine("#if defined(_WIN32)");
@@ -229,7 +260,6 @@ public sealed class CppSdkExporter : IExporter
         writer.WriteLine("#if defined(_WIN32)");
         writer.WriteLine("    return reinterpret_cast<uintptr_t>(GetModuleHandleA(\"GameAssembly.dll\"));");
         writer.WriteLine("#else");
-        writer.WriteLine("    // Linux / Android libil2cpp.so resolver");
         writer.WriteLine("    return reinterpret_cast<uintptr_t>(dlopen(\"libil2cpp.so\", RTLD_NOLOAD));");
         writer.WriteLine("#endif");
         writer.WriteLine("}");
@@ -243,9 +273,10 @@ public sealed class CppSdkExporter : IExporter
         writer.WriteLine("}");
 
         logger?.Invoke($"Wrote: {initPath}");
+        return initPath;
     }
 
-    private static void ExportDllMain(DumpContext context, string sdkDir, Action<string>? logger)
+    private static string ExportDllMain(DumpContext context, string sdkDir, Action<string>? logger)
     {
         var dllMainPath = Path.Combine(sdkDir, "dllmain.cpp");
         using var writer = new StreamWriter(dllMainPath, false, Encoding.UTF8);
@@ -261,16 +292,9 @@ public sealed class CppSdkExporter : IExporter
         writer.WriteLine();
         writer.WriteLine("DWORD WINAPI MainThread(LPVOID lpParam)");
         writer.WriteLine("{");
-        writer.WriteLine("    // 1. Wait for GameAssembly.dll to initialize");
         writer.WriteLine("    while (!GetIl2CppBase()) {");
         writer.WriteLine("        Sleep(100);");
         writer.WriteLine("    }");
-        writer.WriteLine();
-        writer.WriteLine("    // 2. Initialize hooking framework (e.g. MinHook)");
-        writer.WriteLine("    // MH_Initialize();");
-        writer.WriteLine("    // MH_CreateHook(reinterpret_cast<LPVOID>(GetIl2CppBase() + 0x123456), &Hooked_Method, reinterpret_cast<LPVOID*>(&Original_Method));");
-        writer.WriteLine("    // MH_EnableHook(MH_ALL_HOOKS);");
-        writer.WriteLine();
         writer.WriteLine("    return 0;");
         writer.WriteLine("}");
         writer.WriteLine();
@@ -285,6 +309,7 @@ public sealed class CppSdkExporter : IExporter
         writer.WriteLine("#endif");
 
         logger?.Invoke($"Wrote: {dllMainPath}");
+        return dllMainPath;
     }
 
     private static string SanitizeCpp(string name)

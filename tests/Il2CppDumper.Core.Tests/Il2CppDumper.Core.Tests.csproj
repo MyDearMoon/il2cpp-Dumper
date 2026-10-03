@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Il2CppDumper.Core\Il2CppDumper.Core.csproj" />
+    <ProjectReference Include="..\..\src\Il2CppDumper.Cli\Il2CppDumper.Cli.csproj" />
   </ItemGroup>
 
 </Project>

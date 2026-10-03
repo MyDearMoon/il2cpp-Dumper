@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using Il2CppDumper.Core;
 using Il2CppDumper.Core.Containers;
@@ -35,7 +36,7 @@ public static class Program
             new FigletText("Il2CppDumper")
                 .Color(Color.Cyan1));
 
-        AnsiConsole.MarkupLine("[bold cyan]Il2CppDumper[/] [bold grey]v1.0.0[/]");
+        AnsiConsole.MarkupLine("[bold cyan]Il2CppDumper[/] [bold grey]v1.4.0[/]");
         AnsiConsole.WriteLine();
     }
 
@@ -45,8 +46,8 @@ public static class Program
         AnsiConsole.WriteLine();
 
         AnsiConsole.MarkupLine("[bold yellow]Positional Arguments (No flags required):[/]");
-        AnsiConsole.MarkupLine("  [cyan]il2cpp-dumper[/] [grey]<game_folder | game.apk | game.xapk>[/]");
-        AnsiConsole.MarkupLine("  [cyan]il2cpp-dumper[/] [grey]<GameAssembly.dll | libil2cpp.so> <global-metadata.dat>[/]");
+        AnsiConsole.MarkupLine("  [cyan]il2cpp-dumper[/] [grey]<game_folder | game.apk | game.xapk | game.ipa>[/]");
+        AnsiConsole.MarkupLine("  [cyan]il2cpp-dumper[/] [grey]<GameAssembly.dll | libil2cpp.so | UnityFramework> <global-metadata.dat>[/]");
         AnsiConsole.MarkupLine("  [cyan]il2cpp-dumper[/] [grey]<GameAssembly.dll> <global-metadata.dat> <output_dir>[/]");
         AnsiConsole.WriteLine();
 
@@ -55,14 +56,15 @@ public static class Program
         table.AddColumn("[cyan]Option[/]");
         table.AddColumn("[cyan]Description[/]");
 
-        table.AddRow("-i, --input <path>", "Input file (APK, XAPK, APKM, IPA, ZIP, Game Folder, libil2cpp.so, GameAssembly.dll)");
+        table.AddRow("-i, --input <path>", "Input file (APK, XAPK, APKM, IPA, ZIP, Game Folder, libil2cpp.so, GameAssembly.dll, UnityFramework)");
         table.AddRow("-m, --metadata <path>", "Optional explicit path to global-metadata.dat");
         table.AddRow("-o, --output <path>", "Output directory (defaults to './dump')");
         table.AddRow("-a, --arch <name>", "Preferred architecture: arm64, armv7, x64, x86");
         table.AddRow("-u, --unity <version>", "Override detected Unity version (e.g. 2021.3.56)");
         table.AddRow("--ignore-magic", "Bypass magic requirement and recover structurally valid metadata");
         table.AddRow("--magic <val>", "Custom expected metadata magic (hex e.g. 0x12345678 or decimal)");
-        table.AddRow("--scan-depth <size>", "Scan depth for metadata envelope search (default 4096, e.g. 64KB, 1MB, 0 for all)");
+        table.AddRow("--scan-depth <size>", "Scan depth for metadata envelope search (default 4096, e.g. 64KB, 1MB, 0 or all)");
+        table.AddRow("--no-open", "Suppress opening output directory in file explorer upon completion");
         table.AddRow("--all", "Export all formats (dump.cs, scripts, dummy DLLs, C++ SDK, Frida) [Default]");
         table.AddRow("--dump-cs", "Export dump.cs and script.json only");
         table.AddRow("--scripts", "Export IDA Pro, Ghidra, and Binary Ninja Python scripts");
@@ -172,6 +174,7 @@ public static class Program
         string? outputDir = null;
         Architecture? preferredArch = null;
         string? unityVersion = null;
+        bool noOpen = false;
 
         var options = new ExportOptions
         {
@@ -224,16 +227,33 @@ public static class Program
             {
                 recoveryOptions.IgnoreMagic = true;
             }
+            else if (arg == "--no-open")
+            {
+                noOpen = true;
+            }
             else if (arg == "--magic" && i + 1 < args.Length)
             {
                 var magicStr = args[++i].Trim();
                 if (magicStr.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
                 {
-                    recoveryOptions.CustomMagic = Convert.ToUInt32(magicStr[2..], 16);
+                    if (uint.TryParse(magicStr[2..], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var mHex))
+                    {
+                        recoveryOptions.CustomMagic = mHex;
+                    }
+                    else
+                    {
+                        AnsiConsole.MarkupLine($"[bold red]Error:[/] Invalid hexadecimal value for --magic: '{magicStr}'");
+                        return 1;
+                    }
                 }
-                else if (uint.TryParse(magicStr, out var mVal))
+                else if (uint.TryParse(magicStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var mVal))
                 {
                     recoveryOptions.CustomMagic = mVal;
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine($"[bold red]Error:[/] Invalid value for --magic: '{magicStr}'. Expected a valid hexadecimal (e.g. 0x12345678) or unsigned 32-bit integer.");
+                    return 1;
                 }
             }
             else if (arg == "--scan-depth" && i + 1 < args.Length)
@@ -243,17 +263,43 @@ public static class Program
                 {
                     recoveryOptions.ScanDepth = 0;
                 }
-                else if (depthStr.EndsWith("MB") && int.TryParse(depthStr[..^2], out var mb))
+                else if (depthStr.EndsWith("MB"))
                 {
-                    recoveryOptions.ScanDepth = mb * 1024 * 1024;
+                    if (int.TryParse(depthStr[..^2], out var mb) && mb > 0)
+                    {
+                        recoveryOptions.ScanDepth = mb * 1024 * 1024;
+                    }
+                    else
+                    {
+                        AnsiConsole.MarkupLine($"[bold red]Error:[/] Invalid MB value for --scan-depth: '{depthStr}'");
+                        return 1;
+                    }
                 }
-                else if (depthStr.EndsWith("KB") && int.TryParse(depthStr[..^2], out var kb))
+                else if (depthStr.EndsWith("KB"))
                 {
-                    recoveryOptions.ScanDepth = kb * 1024;
+                    if (int.TryParse(depthStr[..^2], out var kb) && kb > 0)
+                    {
+                        recoveryOptions.ScanDepth = kb * 1024;
+                    }
+                    else
+                    {
+                        AnsiConsole.MarkupLine($"[bold red]Error:[/] Invalid KB value for --scan-depth: '{depthStr}'");
+                        return 1;
+                    }
                 }
-                else if (int.TryParse(depthStr, out var rawDepth))
+                else if (int.TryParse(depthStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rawDepth))
                 {
+                    if (rawDepth < 0)
+                    {
+                        AnsiConsole.MarkupLine($"[bold red]Error:[/] Invalid value for --scan-depth: '{depthStr}'. Scan depth cannot be negative.");
+                        return 1;
+                    }
                     recoveryOptions.ScanDepth = rawDepth;
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine($"[bold red]Error:[/] Invalid value for --scan-depth: '{depthStr}'. Expected a positive integer, size in KB/MB, or 0/all.");
+                    return 1;
                 }
             }
             else if (arg == "--all")
@@ -299,37 +345,43 @@ public static class Program
         // 1 arg:  <input>
         // 2 args: <binary> <metadata>
         // 3 args: <binary> <metadata> <output>
-        if (inputPath == null && positionalArgs.Count > 0)
+        if (positionalArgs.Count == 1 && string.IsNullOrEmpty(inputPath))
         {
             inputPath = positionalArgs[0];
-            if (positionalArgs.Count > 1 && metadataPath == null)
-            {
-                metadataPath = positionalArgs[1];
-            }
-            if (positionalArgs.Count > 2 && outputDir == null)
-            {
-                outputDir = positionalArgs[2];
-            }
+        }
+        else if (positionalArgs.Count == 2)
+        {
+            if (string.IsNullOrEmpty(inputPath)) inputPath = positionalArgs[0];
+            if (string.IsNullOrEmpty(metadataPath)) metadataPath = positionalArgs[1];
+        }
+        else if (positionalArgs.Count >= 3)
+        {
+            if (string.IsNullOrEmpty(inputPath)) inputPath = positionalArgs[0];
+            if (string.IsNullOrEmpty(metadataPath)) metadataPath = positionalArgs[1];
+            if (string.IsNullOrEmpty(outputDir)) outputDir = positionalArgs[2];
         }
 
         if (string.IsNullOrEmpty(inputPath))
         {
-            AnsiConsole.MarkupLine("[bold red]Error:[/] No input specified. Drag-and-drop a file or use: il2cpp-dumper <input>");
+            AnsiConsole.MarkupLine("[bold red]Error:[/] No input target specified.");
             PrintHelp();
             return 1;
         }
 
-        outputDir ??= Path.Combine(Directory.Exists(inputPath) ? inputPath : (Path.GetDirectoryName(inputPath) ?? "."), "dump");
+        if (string.IsNullOrEmpty(outputDir))
+        {
+            var baseDir = Directory.Exists(inputPath)
+                ? inputPath
+                : (Path.GetDirectoryName(inputPath) ?? ".");
+            outputDir = Path.Combine(baseDir, "dump");
+        }
 
         if (!hasSpecificExport)
         {
             options = ExportOptions.All;
         }
 
-        // If invoked via single-argument drag-and-drop in Windows Explorer, pause before closing window
-        var isDragAndDrop = args.Length == 1 && !args[0].StartsWith('-');
-
-        return ExecuteDumper(inputPath, outputDir, metadataPath, preferredArch, options, unityVersion, recoveryOptions, isDragAndDrop);
+        return ExecuteDumper(inputPath, outputDir, metadataPath, preferredArch, options, unityVersion, recoveryOptions, noOpen: noOpen);
     }
 
     private static int ExecuteDumper(
@@ -340,7 +392,8 @@ public static class Program
         ExportOptions options,
         string? unityVersion = null,
         MetadataRecoveryOptions? recoveryOptions = null,
-        bool isInteractive = false)
+        bool isInteractive = false,
+        bool noOpen = false)
     {
         DumpResult? result = null;
 
@@ -398,6 +451,8 @@ public static class Program
             table.AddRow("Unity Version", result.Context.UnityVersion);
             table.AddRow("Architecture", result.Context.Architecture.ToString());
             table.AddRow("Binary Format", result.Context.Format.ToString());
+            table.AddRow("Analysis Mode", result.Context.AnalysisMode.ToString());
+            table.AddRow("Address Confidence", result.Context.AddressConfidence.ToString());
             table.AddRow("Assemblies / Images", result.Context.TotalImages.ToString());
             table.AddRow("Types Dumped", result.Context.TotalTypes.ToString("N0"));
             table.AddRow("Methods Dumped", result.Context.TotalMethods.ToString("N0"));
@@ -414,7 +469,7 @@ public static class Program
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine($"[bold green]Success![/] All files generated in: [cyan]{Markup.Escape(result.OutputDirectory)}[/]");
 
-        if (isInteractive && !Console.IsInputRedirected && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        if (!noOpen && isInteractive && !Console.IsInputRedirected && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             AnsiConsole.WriteLine();
             if (AnsiConsole.Confirm("Open output folder in File Explorer?", defaultValue: true))
@@ -427,10 +482,7 @@ public static class Program
                         UseShellExecute = true
                     });
                 }
-                catch
-                {
-                    // Ignore explorer open failure
-                }
+                catch { }
             }
         }
 
@@ -449,16 +501,12 @@ public static class Program
         if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
 
         var cleaned = raw.Trim();
-
-        // Handle PowerShell drag-and-drop prefix: & '...'
         if (cleaned.StartsWith('&'))
         {
             cleaned = cleaned[1..].Trim();
         }
 
-        // Strip single and double quotes added by Windows drag-and-drop
         cleaned = cleaned.Trim('"', '\'');
-
         return Path.GetFullPath(cleaned);
     }
 }

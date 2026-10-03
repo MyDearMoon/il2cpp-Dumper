@@ -36,16 +36,36 @@ public static class MoontonDumper
             throw new InvalidOperationException("Failed to load any valid Moonton metadata partitions.");
         }
 
+        var arch = Architecture.Arm64;
+        var fmt = BinaryFormat.Elf;
+        if (!string.IsNullOrEmpty(binaryPath) && File.Exists(binaryPath))
+        {
+            var id = BinaryInspector.Inspect(binaryPath);
+            if (id.Architecture != Architecture.Unknown) arch = id.Architecture;
+            if (id.Format != BinaryFormat.Unknown) fmt = id.Format;
+        }
+
         var dumpContext = new DumpContext
         {
             MetadataVersion = 24.3f,
             UnityVersion = "2019.4.33f1 (Moonton / MLBB HybridCLR)",
-            Architecture = Architecture.Arm64,
-            Format = BinaryFormat.Elf
+            Architecture = arch,
+            Format = fmt,
+            AnalysisMode = AnalysisMode.MetadataOnly,
+            AddressConfidence = AddressConfidence.Unknown
         };
 
         // Populate string literals from all partitions
-        dumpContext.StringLiterals.AddRange(metaContext.GetAllStringLiterals());
+        var rawLiterals = metaContext.GetAllStringLiterals();
+        for (int i = 0; i < rawLiterals.Count; i++)
+        {
+            dumpContext.StringLiterals.Add(new StringLiteralModel
+            {
+                Index = i,
+                Value = rawLiterals[i],
+                Length = rawLiterals[i].Length
+            });
+        }
         logger?.Invoke($"Loaded {dumpContext.StringLiterals.Count} string literals across partitions.");
 
         // Process partitions: Order Partition 3 (Game C#), then 2 (FirstPass), then 1 (Base Engine)
@@ -112,7 +132,8 @@ public static class MoontonDumper
                         {
                             Name = fName,
                             TypeName = "object",
-                            Offset = f * 8,
+                            Offset = -1,
+                            AddressConfidence = AddressConfidence.Unknown,
                             IsPublic = true
                         });
                     }
@@ -139,8 +160,11 @@ public static class MoontonDumper
                         Name = mName,
                         ReturnType = "void",
                         MethodIndex = m,
-                        Rva = mToken,
-                        MethodPointer = mToken,
+                        Token = mToken,
+                        Rva = 0,
+                        MethodPointer = 0,
+                        FileOffset = -1,
+                        AddressConfidence = AddressConfidence.Unknown,
                         Slot = slot != 0xFFFF ? slot : -1,
                         IsPublic = (mFlags & 0x0006) == 0x0006,
                         IsPrivate = (mFlags & 0x0001) == 0x0001,

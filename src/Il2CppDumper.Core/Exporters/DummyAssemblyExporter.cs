@@ -8,9 +8,10 @@ public sealed class DummyAssemblyExporter : IExporter
 {
     public string Name => "Dummy Assemblies (.dll stubs via Mono.Cecil)";
 
-    public void Export(DumpContext context, string outputDirectory, ExportOptions options, Action<string>? logger = null)
+    public ExportResult Export(DumpContext context, string outputDirectory, ExportOptions options, Action<string>? logger = null)
     {
-        if (!options.ExportDummyDlls) return;
+        var result = new ExportResult { Name = Name };
+        if (!options.ExportDummyDlls) return result;
 
         var dummyDir = Path.Combine(outputDirectory, "DummyDll");
         Directory.CreateDirectory(dummyDir);
@@ -265,15 +266,19 @@ public sealed class DummyAssemblyExporter : IExporter
 
                 var outDll = Path.Combine(dummyDir, $"{cleanName}.dll");
                 assembly.Write(outDll);
+                result.GeneratedFiles.Add(outDll);
                 exportedCount++;
             }
             catch (Exception ex)
             {
+                result.Warnings.Add($"Failed to generate dummy assembly for {img.Name}: {ex.Message}");
                 logger?.Invoke($"Warning: Failed to generate dummy assembly for {img.Name}: {ex.Message}");
             }
         }
 
+        result.Success = exportedCount > 0 || context.Images.Count == 0;
         logger?.Invoke($"Successfully generated {exportedCount} dummy DLL assemblies in {dummyDir}");
+        return result;
     }
 
     private static string CleanAssemblyName(string imgName)

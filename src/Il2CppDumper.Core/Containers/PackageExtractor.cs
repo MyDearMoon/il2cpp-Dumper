@@ -1,17 +1,20 @@
 using System.IO.Compression;
+using Il2CppDumper.Core.Metadata;
 
 namespace Il2CppDumper.Core.Containers;
 
 public static class PackageExtractor
 {
-    private static readonly string[] BinaryNames = { "libil2cpp.so", "gameassembly.dll" };
-    private const string MetadataFileName = "global-metadata.dat";
+    private const long MaxArchiveEntries = 100_000;
+    private const long MaxExtractedSize = 8L * 1024 * 1024 * 1024; // 8 GB
+    private const long MaxCompressionRatio = 100; // 100:1
 
     public static bool IsBinaryCandidate(string fileName)
     {
         var lower = fileName.ToLowerInvariant();
         if (lower == "gameassembly.dll") return true;
         if (lower.EndsWith(".so") && lower.Contains("il2cpp")) return true;
+        if (lower == "unityframework" || lower.EndsWith(".dylib")) return true;
         return false;
     }
 
@@ -61,9 +64,10 @@ public static class PackageExtractor
     public static BinaryFormat DetectFormat(string fileName)
     {
         var ext = Path.GetExtension(fileName).ToLowerInvariant();
-        if (ext == ".dll" || ext == ".exe") return BinaryFormat.PE;
+        if (ext is ".dll" or ".exe") return BinaryFormat.PE;
         if (ext == ".so") return BinaryFormat.Elf;
         if (ext == ".wasm") return BinaryFormat.Wasm;
+        if (fileName.Equals("unityframework", StringComparison.OrdinalIgnoreCase) || ext == ".dylib") return BinaryFormat.MachO;
         return BinaryFormat.Unknown;
     }
 
@@ -105,7 +109,7 @@ public static class PackageExtractor
 
         if (string.IsNullOrEmpty(ctx.BinaryPath) || !File.Exists(ctx.BinaryPath))
         {
-            throw new FileNotFoundException("Failed to locate IL2CPP binary (libil2cpp.so, GameAssembly.dll, or libunity.so) in input.");
+            throw new FileNotFoundException("Failed to locate IL2CPP binary (libil2cpp.so, GameAssembly.dll, UnityFramework, or libunity.so) in input.");
         }
 
         if (string.IsNullOrEmpty(ctx.MetadataPath) || !File.Exists(ctx.MetadataPath))
@@ -114,6 +118,30 @@ public static class PackageExtractor
         }
 
         return ctx;
+    }
+
+    private static void ValidateArchiveSafety(string archivePath, ZipArchive zip)
+    {
+        if (zip.Entries.Count > MaxArchiveEntries)
+        {
+            throw new InvalidOperationException($"Archive exceeds safety limit of {MaxArchiveEntries} entries (actual: {zip.Entries.Count}).");
+        }
+
+        long totalUncompressed = 0;
+        foreach (var entry in zip.Entries)
+        {
+            totalUncompressed += entry.Length;
+            if (totalUncompressed > MaxExtractedSize)
+            {
+                throw new InvalidOperationException($"Archive exceeds safety limit of {MaxExtractedSize / 1024 / 1024 / 1024} GB uncompressed size.");
+            }
+        }
+
+        var fileInfo = new FileInfo(archivePath);
+        if (fileInfo.Length > 1024 * 1024 && totalUncompressed > MaxCompressionRatio * fileInfo.Length)
+        {
+            throw new InvalidOperationException("Archive compression ratio exceeds safety threshold (possible zip bomb).");
+        }
     }
 
     private static void ExtractFromArchive(
@@ -127,6 +155,7 @@ public static class PackageExtractor
         ctx.TempDirectory = tempDir;
 
         using var zip = ZipFile.OpenRead(archivePath);
+        ValidateArchiveSafety(archivePath, zip);
 
         // 1. Check for nested APKs in XAPK / APKM
         var nestedApks = zip.Entries.Where(e => e.FullName.EndsWith(".apk", StringComparison.OrdinalIgnoreCase)).ToList();
@@ -139,6 +168,20 @@ public static class PackageExtractor
             {
                 var arch = DetectArchitectureFromPath(entry.FullName);
                 var fmt = DetectFormat(fileName);
+
+                // Use header-based inspection on the entry stream
+                try
+                {
+                    using var s = entry.Open();
+                    var id = BinaryInspector.Inspect(s);
+                    if (id.Format != BinaryFormat.Unknown) fmt = id.Format;
+                    if (id.Architecture != Architecture.Unknown) arch = id.Architecture;
+                }
+                catch
+                {
+                    // Fall back to path-based detection
+                }
+
                 ctx.DiscoveredBinaries.Add(new DiscoveredBinary
                 {
                     Name = fileName,
@@ -167,12 +210,22 @@ public static class PackageExtractor
                         if (arch == Architecture.Unknown)
                             arch = DetectArchitectureFromPath(apkEntry.FullName);
 
+                        var fmt = DetectFormat(fileName);
+                        try
+                        {
+                            using var s = entry.Open();
+                            var id = BinaryInspector.Inspect(s);
+                            if (id.Format != BinaryFormat.Unknown) fmt = id.Format;
+                            if (id.Architecture != Architecture.Unknown) arch = id.Architecture;
+                        }
+                        catch { }
+
                         ctx.DiscoveredBinaries.Add(new DiscoveredBinary
                         {
                             Name = fileName,
                             RelativePath = $"{apkEntry.FullName}!{entry.FullName}",
                             Architecture = arch,
-                            Format = BinaryFormat.Elf,
+                            Format = fmt == BinaryFormat.Unknown ? BinaryFormat.Elf : fmt,
                             Size = entry.Length,
                             ArchiveEntryName = entry.FullName,
                             NestedArchiveEntryName = apkEntry.FullName
@@ -206,12 +259,12 @@ public static class PackageExtractor
 
         if (ctx.DiscoveredBinaries.Count == 0)
         {
-            throw new InvalidOperationException("No IL2CPP binary (libil2cpp.so, GameAssembly.dll, or libunity.so) found in archive.");
+            throw new InvalidOperationException("No IL2CPP binary (libil2cpp.so, GameAssembly.dll, UnityFramework, or libunity.so) found in archive.");
         }
 
         // Select binary based on preferred architecture (Arm64 preferred by default)
         var selectedBinary = SelectPreferredBinary(ctx.DiscoveredBinaries, preferredArch);
-        logger?.Invoke($"Selected binary: {selectedBinary.RelativePath} ({selectedBinary.Architecture})");
+        logger?.Invoke($"Selected binary: {selectedBinary.RelativePath} ({selectedBinary.Architecture}, {selectedBinary.Format})");
 
         var outBinaryPath = Path.Combine(tempDir, selectedBinary.Name);
         if (selectedBinary.NestedArchiveEntryName != null)
@@ -228,39 +281,117 @@ public static class PackageExtractor
             entry.ExtractToFile(outBinaryPath, true);
         }
 
+        // If binary is a Mach-O fat binary, extract slice
+        using (var bFs = File.OpenRead(outBinaryPath))
+        {
+            var id = BinaryInspector.Inspect(bFs);
+            if (id.IsFatBinary)
+            {
+                var slice = BinaryInspector.ExtractSlice(bFs, preferredArch ?? Architecture.Arm64);
+                if (slice != null && slice.Length > 0)
+                {
+                    bFs.Close();
+                    File.WriteAllBytes(outBinaryPath, slice);
+                    logger?.Invoke($"Extracted {id.Architecture} slice from Mach-O universal fat binary.");
+                }
+            }
+            if (id.Format != BinaryFormat.Unknown) selectedBinary.Format = id.Format;
+            if (id.Architecture != Architecture.Unknown) selectedBinary.Architecture = id.Architecture;
+        }
+
         ctx.BinaryPath = outBinaryPath;
         ctx.Architecture = selectedBinary.Architecture;
         ctx.Format = selectedBinary.Format;
 
-        // 3. Extract metadata
-        var metaEntry = zip.Entries.FirstOrDefault(e => IsMetadataCandidate(Path.GetFileName(e.FullName)));
-
-        if (metaEntry == null && nestedApks.Count > 0)
+        // 3. Extract metadata with candidate scoring (Part 9)
+        var bestMetaEntry = SelectBestMetadataEntry(zip, nestedApks, logger);
+        if (bestMetaEntry != null)
         {
-            foreach (var apkEntry in nestedApks)
-            {
-                using var apkStream = apkEntry.Open();
-                using var nestedZip = new ZipArchive(apkStream, ZipArchiveMode.Read);
-                var entry = nestedZip.Entries.FirstOrDefault(e => IsMetadataCandidate(Path.GetFileName(e.FullName)));
-                if (entry != null)
-                {
-                    var outMeta = Path.Combine(tempDir, Path.GetFileName(entry.FullName));
-                    entry.ExtractToFile(outMeta, true);
-                    ctx.MetadataPath = outMeta;
-                    break;
-                }
-            }
-        }
-        else if (metaEntry != null)
-        {
-            var outMeta = Path.Combine(tempDir, Path.GetFileName(metaEntry.FullName));
-            metaEntry.ExtractToFile(outMeta, true);
+            var outMeta = Path.Combine(tempDir, Path.GetFileName(bestMetaEntry.FullName));
+            bestMetaEntry.ExtractToFile(outMeta, true);
             ctx.MetadataPath = outMeta;
+            logger?.Invoke($"Selected best metadata entry: {bestMetaEntry.FullName}");
         }
         else
         {
             logger?.Invoke("Warning: global-metadata.dat not found in standard archive paths.");
         }
+    }
+
+    private static ZipArchiveEntry? SelectBestMetadataEntry(
+        ZipArchive zip,
+        List<ZipArchiveEntry> nestedApks,
+        Action<string>? logger)
+    {
+        var candidates = new List<(ZipArchiveEntry Entry, int Score)>();
+
+        void EvaluateEntry(ZipArchiveEntry entry)
+        {
+            var fileName = Path.GetFileName(entry.FullName);
+            if (!IsMetadataCandidate(fileName)) return;
+
+            var score = 0;
+            var lower = entry.FullName.ToLowerInvariant().Replace('\\', '/');
+
+            if (lower.Contains("assets/bin/data/managed/metadata/global-metadata.dat") ||
+                lower.Contains("data/managed/metadata/global-metadata.dat"))
+            {
+                score += 100;
+            }
+            else if (lower.Contains("managed/metadata"))
+            {
+                score += 70;
+            }
+
+            if (fileName.Equals("global-metadata.dat", StringComparison.OrdinalIgnoreCase))
+            {
+                score += 30;
+            }
+            else
+            {
+                score += 10;
+            }
+
+            // Sample header for structural validity
+            try
+            {
+                using var stream = entry.Open();
+                var header = new byte[Math.Min(288, (int)entry.Length)];
+                var read = stream.Read(header, 0, header.Length);
+                if (read >= 8)
+                {
+                    var conf = MetadataRecoveryEngine.EvaluateHeader(header.AsSpan(0, read), entry.Length);
+                    score += conf.Score;
+                }
+            }
+            catch
+            {
+                // Ignore evaluation errors
+            }
+
+            candidates.Add((entry, score));
+        }
+
+        foreach (var entry in zip.Entries)
+        {
+            EvaluateEntry(entry);
+        }
+
+        if (candidates.Count == 0 && nestedApks.Count > 0)
+        {
+            foreach (var apk in nestedApks)
+            {
+                using var s = apk.Open();
+                using var nZip = new ZipArchive(s, ZipArchiveMode.Read);
+                foreach (var entry in nZip.Entries)
+                {
+                    EvaluateEntry(entry);
+                }
+            }
+        }
+
+        if (candidates.Count == 0) return null;
+        return candidates.OrderByDescending(c => c.Score).First().Entry;
     }
 
     private static void DetectFromDirectory(
@@ -269,7 +400,6 @@ public static class PackageExtractor
         Architecture? preferredArch,
         Action<string>? logger)
     {
-        // 1. Check if directory contains split APK files
         var apkFiles = Directory.GetFiles(dir, "*.apk", SearchOption.TopDirectoryOnly);
         if (apkFiles.Length > 0)
         {
@@ -278,16 +408,18 @@ public static class PackageExtractor
             return;
         }
 
-        // 2. Loose unzipped directory scan
         var allFiles = Directory.GetFiles(dir, "*", SearchOption.AllDirectories);
+        var metaCandidates = new List<(string Path, int Score)>();
 
         foreach (var file in allFiles)
         {
             var fileName = Path.GetFileName(file);
             if (IsBinaryCandidate(fileName))
             {
-                var arch = DetectArchitectureFromPath(file);
-                var fmt = DetectFormat(fileName);
+                var id = BinaryInspector.Inspect(file);
+                var arch = id.Architecture != Architecture.Unknown ? id.Architecture : DetectArchitectureFromPath(file);
+                var fmt = id.Format != BinaryFormat.Unknown ? id.Format : DetectFormat(fileName);
+
                 ctx.DiscoveredBinaries.Add(new DiscoveredBinary
                 {
                     Name = fileName,
@@ -300,11 +432,34 @@ public static class PackageExtractor
 
             if (IsMetadataCandidate(fileName))
             {
-                ctx.MetadataPath = file;
+                var score = 0;
+                var lower = file.ToLowerInvariant().Replace('\\', '/');
+                if (lower.Contains("managed/metadata")) score += 70;
+                if (fileName.Equals("global-metadata.dat", StringComparison.OrdinalIgnoreCase)) score += 30;
+
+                try
+                {
+                    var fileLen = new FileInfo(file).Length;
+                    using var fs = File.OpenRead(file);
+                    var header = new byte[Math.Min(288, (int)fileLen)];
+                    var read = fs.Read(header, 0, header.Length);
+                    if (read >= 8)
+                    {
+                        var conf = MetadataRecoveryEngine.EvaluateHeader(header.AsSpan(0, read), fileLen, stream: fs);
+                        score += conf.Score;
+                    }
+                }
+                catch { }
+
+                metaCandidates.Add((file, score));
             }
         }
 
-        // Check for Unity Mono games (Assembly-CSharp.dll without global-metadata.dat)
+        if (metaCandidates.Count > 0)
+        {
+            ctx.MetadataPath = metaCandidates.OrderByDescending(m => m.Score).First().Path;
+        }
+
         var isMono = allFiles.Any(f => Path.GetFileName(f).Equals("Assembly-CSharp.dll", StringComparison.OrdinalIgnoreCase));
         if (isMono && string.IsNullOrEmpty(ctx.MetadataPath))
         {
@@ -313,7 +468,6 @@ public static class PackageExtractor
                 "Managed assemblies (e.g. Assembly-CSharp.dll) already exist in the 'Managed' folder and can be opened directly in dnSpy or ILSpy without dumping.");
         }
 
-        // Fallback for libunity.so if no libil2cpp was found
         if (ctx.DiscoveredBinaries.Count == 0)
         {
             foreach (var file in allFiles)
@@ -321,7 +475,8 @@ public static class PackageExtractor
                 var fileName = Path.GetFileName(file);
                 if (IsFallbackBinaryCandidate(fileName))
                 {
-                    var arch = DetectArchitectureFromPath(file);
+                    var id = BinaryInspector.Inspect(file);
+                    var arch = id.Architecture != Architecture.Unknown ? id.Architecture : DetectArchitectureFromPath(file);
                     ctx.DiscoveredBinaries.Add(new DiscoveredBinary
                     {
                         Name = fileName,
@@ -336,7 +491,7 @@ public static class PackageExtractor
 
         if (ctx.DiscoveredBinaries.Count == 0)
         {
-            throw new FileNotFoundException($"No IL2CPP binary (GameAssembly.dll, libil2cpp.so, or libunity.so) found in directory: {dir}");
+            throw new FileNotFoundException($"No IL2CPP binary (GameAssembly.dll, libil2cpp.so, UnityFramework, or libunity.so) found in directory: {dir}");
         }
 
         var selected = SelectPreferredBinary(ctx.DiscoveredBinaries, preferredArch);
@@ -344,7 +499,7 @@ public static class PackageExtractor
         ctx.BinaryPath = fullPath;
         ctx.Architecture = selected.Architecture;
         ctx.Format = selected.Format;
-        logger?.Invoke($"Found binary: {fullPath} ({ctx.Architecture})");
+        logger?.Invoke($"Found binary: {fullPath} ({ctx.Architecture}, {ctx.Format})");
 
         if (!string.IsNullOrEmpty(ctx.MetadataPath))
         {
@@ -368,6 +523,8 @@ public static class PackageExtractor
         foreach (var apkPath in apkFiles)
         {
             using var zip = ZipFile.OpenRead(apkPath);
+            ValidateArchiveSafety(apkPath, zip);
+
             foreach (var entry in zip.Entries)
             {
                 var fileName = Path.GetFileName(entry.FullName);
@@ -378,6 +535,15 @@ public static class PackageExtractor
                         arch = DetectArchitectureFromPath(apkPath);
 
                     var fmt = DetectFormat(fileName);
+                    try
+                    {
+                        using var s = entry.Open();
+                        var id = BinaryInspector.Inspect(s);
+                        if (id.Format != BinaryFormat.Unknown) fmt = id.Format;
+                        if (id.Architecture != Architecture.Unknown) arch = id.Architecture;
+                    }
+                    catch { }
+
                     ctx.DiscoveredBinaries.Add(new DiscoveredBinary
                     {
                         Name = fileName,
@@ -398,7 +564,6 @@ public static class PackageExtractor
             }
         }
 
-        // Fallback for libunity.so if no libil2cpp candidate exists
         if (ctx.DiscoveredBinaries.Count == 0)
         {
             foreach (var apkPath in apkFiles)
@@ -474,20 +639,19 @@ public static class PackageExtractor
         if (IsMetadataCandidate(fileName))
         {
             ctx.MetadataPath = filePath;
-            // Find binary nearby
             var nearbyBin = Directory.GetFiles(dir, "*", SearchOption.AllDirectories)
                 .FirstOrDefault(f => IsBinaryCandidate(Path.GetFileName(f)));
 
             if (nearbyBin != null)
             {
+                var id = BinaryInspector.Inspect(nearbyBin);
                 ctx.BinaryPath = nearbyBin;
-                ctx.Architecture = DetectArchitectureFromPath(nearbyBin);
-                ctx.Format = DetectFormat(nearbyBin);
+                ctx.Architecture = id.Architecture != Architecture.Unknown ? id.Architecture : DetectArchitectureFromPath(nearbyBin);
+                ctx.Format = id.Format != BinaryFormat.Unknown ? id.Format : DetectFormat(nearbyBin);
             }
         }
         else
         {
-            // If user dropped the game executable (e.g. BlueArchive.exe), resolve GameAssembly.dll alongside it
             var targetBinary = filePath;
             if (fileName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && !IsBinaryCandidate(fileName))
             {
@@ -499,9 +663,10 @@ public static class PackageExtractor
                 }
             }
 
+            var id = BinaryInspector.Inspect(targetBinary);
             ctx.BinaryPath = targetBinary;
-            ctx.Architecture = DetectArchitectureFromPath(targetBinary);
-            ctx.Format = DetectFormat(targetBinary);
+            ctx.Architecture = id.Architecture != Architecture.Unknown ? id.Architecture : DetectArchitectureFromPath(targetBinary);
+            ctx.Format = id.Format != BinaryFormat.Unknown ? id.Format : DetectFormat(targetBinary);
 
             if (!string.IsNullOrEmpty(metadataOverride) && File.Exists(metadataOverride))
             {
@@ -509,7 +674,6 @@ public static class PackageExtractor
             }
             else
             {
-                // Look for global-metadata.dat nearby
                 var nearbyMeta = Directory.GetFiles(dir, "*", SearchOption.AllDirectories)
                     .FirstOrDefault(f => IsMetadataCandidate(Path.GetFileName(f)));
                 if (nearbyMeta != null)

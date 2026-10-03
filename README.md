@@ -41,6 +41,8 @@ All outputs are saved to the `dump/` folder:
 | :--- | :--- |
 | `dump.cs` | Human-readable C# pseudo-code with field memory offsets and method RVAs |
 | `script.json` | Symbol table mapping functions, offsets, and strings for tooling |
+| `stringliteral.json` | Complete string literal table with exact token indices and metadata offsets |
+| `dump-manifest.json` | Execution provenance, SHA-256 hashes, analysis mode, and exporter status |
 | `DummyDll/` | Stripped .NET assemblies for browsing in dnSpy, ILSpy, or referencing in BepInEx |
 | `ida.py` / `ghidra.py` / `binja.py` | One-click symbol restoration scripts for IDA Pro, Ghidra, and Binary Ninja |
 | `cpp-sdk/` | C++ headers (`il2cpp.h`, `il2cpp-init.h`, `dllmain.cpp`) with struct layouts and hook scaffolding |

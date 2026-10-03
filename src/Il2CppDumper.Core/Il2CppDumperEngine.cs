@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text.Json;
 using AssetRipper.Primitives;
+using Il2CppDumper.Core.Common;
 using Il2CppDumper.Core.Containers;
 using Il2CppDumper.Core.Exporters;
 using Il2CppDumper.Core.Metadata;
@@ -19,6 +22,29 @@ public sealed class DumpResult
     public MetadataRecoveryResult? RecoveryResult { get; set; }
     public string OutputDirectory { get; set; } = string.Empty;
     public List<string> GeneratedFiles { get; set; } = new();
+    public List<ExportResult> ExporterResults { get; set; } = new();
+}
+
+public sealed class DumpManifest
+{
+    public string ToolVersion { get; set; } = "1.4.0";
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    public float MetadataVersion { get; set; }
+    public string UnityVersion { get; set; } = string.Empty;
+    public string Architecture { get; set; } = string.Empty;
+    public string BinaryFormat { get; set; } = string.Empty;
+    public string AnalysisMode { get; set; } = string.Empty;
+    public string AddressConfidence { get; set; } = string.Empty;
+    public string RecoveryMethod { get; set; } = string.Empty;
+    public long RecoveryOffset { get; set; }
+    public int RecoveryConfidence { get; set; }
+    public string InputBinaryPath { get; set; } = string.Empty;
+    public string InputBinarySha256 { get; set; } = string.Empty;
+    public string InputMetadataPath { get; set; } = string.Empty;
+    public string InputMetadataSha256 { get; set; } = string.Empty;
+    public List<string> GeneratedFiles { get; set; } = new();
+    public List<ExportResult> ExporterResults { get; set; } = new();
+    public List<string> Warnings { get; set; } = new();
 }
 
 public static class Il2CppDumperEngine
@@ -41,17 +67,25 @@ public static class Il2CppDumperEngine
             OutputDirectory = outputDirectory
         };
 
+        using var tempWorkspace = new TempWorkspace();
         ExtractionContext? extractionCtx = null;
         try
         {
             logger?.Invoke($"Starting Il2Cpp-Dumper pipeline for: {inputPath}");
 
-            // 1. Container Ingestion & File Extraction
-            extractionCtx = PackageExtractor.Ingest(inputPath, metadataOverride, preferredArch, logger);
-            logger?.Invoke($"Target binary: {extractionCtx.BinaryPath} ({extractionCtx.Architecture})");
+            // 1. Output Hygiene: Clean known stale artifacts (Part 15)
+            CleanOutputDirectory(outputDirectory, logger);
 
-            // Normalize and recover metadata (auto-detect envelope, tampered magic, XOR obfuscation)
-            var recovery = MetadataNormalizer.Normalize(extractionCtx.MetadataPath, recoveryOptions, extractionCtx.TempDirectory, logger);
+            // 2. Container Ingestion & File Extraction
+            extractionCtx = PackageExtractor.Ingest(inputPath, metadataOverride, preferredArch, logger);
+            if (!string.IsNullOrEmpty(extractionCtx.TempDirectory))
+            {
+                tempWorkspace.TrackDirectory(extractionCtx.TempDirectory);
+            }
+            logger?.Invoke($"Target binary: {extractionCtx.BinaryPath} ({extractionCtx.Architecture}, {extractionCtx.Format})");
+
+            // 3. Normalize and recover metadata
+            var recovery = MetadataNormalizer.Normalize(extractionCtx.MetadataPath, recoveryOptions, tempWorkspace.WorkspaceRoot, logger);
             result.RecoveryResult = recovery;
 
             if (!recovery.Success)
@@ -59,6 +93,10 @@ public static class Il2CppDumperEngine
                 throw new InvalidOperationException(recovery.Diagnostic ?? "Metadata normalization and recovery failed.");
             }
 
+            if (recovery.WasNormalized)
+            {
+                tempWorkspace.TrackFile(recovery.ResultPath);
+            }
             extractionCtx.MetadataPath = recovery.ResultPath;
             logger?.Invoke($"Target metadata: {extractionCtx.MetadataPath}");
 
@@ -74,7 +112,6 @@ public static class Il2CppDumperEngine
             }
             else
             {
-                // Auto-detect or default unity version
                 var unityVersion = default(UnityVersion);
                 if (!string.IsNullOrEmpty(unityVersionOverride) && UnityVersionDetector.TryParseVersion(unityVersionOverride, out var parsedVer))
                 {
@@ -96,55 +133,123 @@ public static class Il2CppDumperEngine
                         throw new InvalidOperationException("Failed to initialize LibCpp2IL context from provided files.");
                     }
 
-                    // 3. Build Unified Object Model
                     dumpContext = DumpModelBuilder.Build(cppContext, extractionCtx.Architecture, extractionCtx.Format, logger);
                 }
-                catch (Exception ex)
+                // Parse failure classification (Part 18): Only legitimate binary parsing limitations fallback to metadata-only
+                catch (Exception ex) when (ex is not (FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException or OutOfMemoryException or ArgumentNullException or NullReferenceException))
                 {
                     logger?.Invoke($"[Warning] Binary structure analysis encountered an issue: {ex.Message}");
                     logger?.Invoke("Switching to Metadata Fallback mode (reconstructing all assemblies, types, methods, fields, and strings directly from global-metadata.dat)...");
                     dumpContext = MetadataOnlyDumper.Dump(extractionCtx.MetadataPath, extractionCtx.BinaryPath, unityVersion, logger);
                 }
             }
+
+            // Set provenance info on model
+            dumpContext.RecoveryMethod = recovery.Method;
+            dumpContext.RecoveryOffset = recovery.Offset;
+            dumpContext.RecoveryConfidenceScore = recovery.ConfidenceScore;
             result.Context = dumpContext;
 
-            // 4. Run Exporters
+            // 4. Run Exporters Independently (Part 14)
             Directory.CreateDirectory(outputDirectory);
 
             var dumpCsExporter = new DumpCsExporter();
-            dumpCsExporter.Export(dumpContext, outputDirectory, options, logger);
+            var dumpCsRes = dumpCsExporter.Export(dumpContext, outputDirectory, options, logger);
+            result.ExporterResults.Add(dumpCsRes);
 
             var scriptExporter = new ScriptExporter();
-            scriptExporter.Export(dumpContext, outputDirectory, options, logger);
+            var scriptRes = scriptExporter.Export(dumpContext, outputDirectory, options, logger);
+            result.ExporterResults.Add(scriptRes);
 
             var dummyExporter = new DummyAssemblyExporter();
-            try
-            {
-                dummyExporter.Export(dumpContext, outputDirectory, options, logger);
-            }
-            catch (Exception ex)
-            {
-                logger?.Invoke($"[Warning] Dummy assembly generation skipped: {ex.Message}");
-            }
+            var dummyRes = dummyExporter.Export(dumpContext, outputDirectory, options, logger);
+            result.ExporterResults.Add(dummyRes);
 
             var cppSdkExporter = new CppSdkExporter();
-            cppSdkExporter.Export(dumpContext, outputDirectory, options, logger);
+            var cppSdkRes = cppSdkExporter.Export(dumpContext, outputDirectory, options, logger);
+            result.ExporterResults.Add(cppSdkRes);
 
             if (options.ExportFridaScripts)
             {
-                FridaDumpGenerator.GenerateScripts(outputDirectory, logger);
+                try
+                {
+                    FridaDumpGenerator.GenerateScripts(outputDirectory, logger);
+                    var fridaDir = Path.Combine(outputDirectory, "frida-runtime-dumper");
+                    var fridaFiles = Directory.Exists(fridaDir)
+                        ? Directory.GetFiles(fridaDir, "*", SearchOption.AllDirectories).ToList()
+                        : new List<string>();
+
+                    result.ExporterResults.Add(new ExportResult
+                    {
+                        Name = "Frida Scripts",
+                        Success = true,
+                        GeneratedFiles = fridaFiles
+                    });
+                }
+                catch (Exception ex)
+                {
+                    result.ExporterResults.Add(new ExportResult
+                    {
+                        Name = "Frida Scripts",
+                        Success = false,
+                        Error = ex.Message
+                    });
+                }
             }
 
-            // Collect generated files
+            // Collect all generated files (excluding VCS directories like .git)
             if (Directory.Exists(outputDirectory))
             {
-                result.GeneratedFiles.AddRange(Directory.GetFiles(outputDirectory, "*", SearchOption.AllDirectories));
+                var files = Directory.GetFiles(outputDirectory, "*", SearchOption.AllDirectories)
+                    .Where(f => !f.Contains(Path.DirectorySeparatorChar + ".git" + Path.DirectorySeparatorChar) &&
+                                !f.Contains("/.git/") &&
+                                !f.EndsWith(Path.DirectorySeparatorChar + ".git"));
+                result.GeneratedFiles.AddRange(files);
             }
+
+            // 5. Generate dump-manifest.json (Part 13)
+            var manifest = new DumpManifest
+            {
+                MetadataVersion = dumpContext.MetadataVersion,
+                UnityVersion = dumpContext.UnityVersion,
+                Architecture = dumpContext.Architecture.ToString(),
+                BinaryFormat = dumpContext.Format.ToString(),
+                AnalysisMode = dumpContext.AnalysisMode.ToString(),
+                AddressConfidence = dumpContext.AddressConfidence.ToString(),
+                RecoveryMethod = recovery.Method.ToString(),
+                RecoveryOffset = recovery.Offset,
+                RecoveryConfidence = recovery.ConfidenceScore,
+                InputBinaryPath = extractionCtx.BinaryPath,
+                InputBinarySha256 = ComputeSha256(extractionCtx.BinaryPath),
+                InputMetadataPath = extractionCtx.MetadataPath,
+                InputMetadataSha256 = ComputeSha256(extractionCtx.MetadataPath),
+                GeneratedFiles = result.GeneratedFiles.ToList(),
+                ExporterResults = result.ExporterResults.ToList(),
+                Warnings = result.ExporterResults.SelectMany(r => r.Warnings).ToList()
+            };
+
+            var manifestPath = Path.Combine(outputDirectory, "dump-manifest.json");
+            File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
+            if (!result.GeneratedFiles.Contains(manifestPath))
+            {
+                result.GeneratedFiles.Add(manifestPath);
+            }
+            logger?.Invoke($"Wrote: {manifestPath}");
 
             sw.Stop();
             result.Elapsed = sw.Elapsed;
-            result.Success = true;
-            logger?.Invoke($"Pipeline completed successfully in {sw.Elapsed.TotalSeconds:F2}s!");
+            var failureCount = result.ExporterResults.Count(r => !r.Success);
+            result.Success = failureCount == 0;
+
+            if (failureCount > 0)
+            {
+                logger?.Invoke($"Dump completed with {failureCount} exporter failure(s) in {sw.Elapsed.TotalSeconds:F2}s.");
+            }
+            else
+            {
+                logger?.Invoke($"Pipeline completed successfully in {sw.Elapsed.TotalSeconds:F2}s!");
+            }
+
             return result;
         }
         catch (Exception ex)
@@ -159,6 +264,57 @@ public static class Il2CppDumperEngine
         finally
         {
             extractionCtx?.Dispose();
+        }
+    }
+
+    private static void CleanOutputDirectory(string outputDirectory, Action<string>? logger)
+    {
+        if (!Directory.Exists(outputDirectory)) return;
+
+        var knownFiles = new[]
+        {
+            "dump.cs",
+            "script.json",
+            "stringliteral.json",
+            "dump-manifest.json",
+            "ida.py",
+            "ghidra.py",
+            "binja.py"
+        };
+
+        foreach (var file in knownFiles)
+        {
+            var p = Path.Combine(outputDirectory, file);
+            if (File.Exists(p))
+            {
+                try { File.Delete(p); } catch { }
+            }
+        }
+
+        var knownDirs = new[] { "cpp-sdk", "DummyDll", "frida-scripts", "frida-runtime-dumper" };
+        foreach (var dir in knownDirs)
+        {
+            var p = Path.Combine(outputDirectory, dir);
+            if (Directory.Exists(p))
+            {
+                try { Directory.Delete(p, true); } catch { }
+            }
+        }
+    }
+
+    private static string ComputeSha256(string filePath)
+    {
+        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return string.Empty;
+        try
+        {
+            using var fs = File.OpenRead(filePath);
+            using var sha = SHA256.Create();
+            var hash = sha.ComputeHash(fs);
+            return Convert.ToHexString(hash).ToLowerInvariant();
+        }
+        catch
+        {
+            return string.Empty;
         }
     }
 }

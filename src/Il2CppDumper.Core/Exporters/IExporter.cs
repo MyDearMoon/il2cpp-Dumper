@@ -26,8 +26,17 @@ public class ExportOptions
     };
 }
 
+public sealed class ExportResult
+{
+    public string Name { get; set; } = string.Empty;
+    public bool Success { get; set; }
+    public List<string> GeneratedFiles { get; set; } = new();
+    public string? Error { get; set; }
+    public List<string> Warnings { get; set; } = new();
+}
+
 public interface IExporter
 {
     string Name { get; }
-    void Export(DumpContext context, string outputDirectory, ExportOptions options, Action<string>? logger = null);
+    ExportResult Export(DumpContext context, string outputDirectory, ExportOptions options, Action<string>? logger = null);
 }

@@ -19,27 +19,36 @@ public static class DumpModelBuilder
             MetadataVersion = cppContext.Metadata.MetadataVersion,
             UnityVersion = cppContext.Metadata.UnityVersion.ToString(),
             Architecture = architecture,
-            Format = format
+            Format = format,
+            AnalysisMode = AnalysisMode.Full,
+            AddressConfidence = AddressConfidence.Exact
         };
 
         logger?.Invoke($"Building model for metadata v{model.MetadataVersion} (Unity {model.UnityVersion})...");
 
-        // 1. Process String Literals
+        // 1. Process String Literals preserving index and empty strings (Part 12)
         if (cppContext.Metadata.stringLiterals != null)
         {
             for (var i = 0; i < cppContext.Metadata.stringLiterals.Length; i++)
             {
                 try
                 {
-                    var str = cppContext.Metadata.GetStringLiteralFromIndex((uint)i);
-                    if (!string.IsNullOrEmpty(str))
+                    var str = cppContext.Metadata.GetStringLiteralFromIndex((uint)i) ?? string.Empty;
+                    model.StringLiterals.Add(new StringLiteralModel
                     {
-                        model.StringLiterals.Add(str);
-                    }
+                        Index = i,
+                        Value = str,
+                        Length = str.Length
+                    });
                 }
                 catch
                 {
-                    // Ignore malformed string literal
+                    model.StringLiterals.Add(new StringLiteralModel
+                    {
+                        Index = i,
+                        Value = string.Empty,
+                        Length = 0
+                    });
                 }
             }
         }
@@ -190,6 +199,8 @@ public static class DumpModelBuilder
             ReturnType = methodDef.ReturnType?.ToString() ?? "void",
             MethodPointer = methodDef.MethodPointer,
             Rva = methodDef.Rva,
+            Token = methodDef.token,
+            AddressConfidence = AddressConfidence.Exact,
             FileOffset = methodDef.MethodOffsetInFile,
             Slot = methodDef.slot,
             MethodIndex = methodIndex,
@@ -238,6 +249,7 @@ public static class DumpModelBuilder
             TypeName = fieldDef.FieldType?.ToString() ?? "object",
             IsStatic = isStatic,
             IsConst = isConst,
+            AddressConfidence = AddressConfidence.Exact,
             IsPublic = typeDef.FieldAttributes != null && fieldIndexInType < typeDef.FieldAttributes.Length && typeDef.FieldAttributes[fieldIndexInType].HasFlag(FieldAttributes.Public),
             IsPrivate = typeDef.FieldAttributes != null && fieldIndexInType < typeDef.FieldAttributes.Length && typeDef.FieldAttributes[fieldIndexInType].HasFlag(FieldAttributes.Private)
         };
@@ -254,6 +266,7 @@ public static class DumpModelBuilder
         catch
         {
             fieldModel.Offset = -1;
+            fieldModel.AddressConfidence = AddressConfidence.Unknown;
         }
 
         return fieldModel;

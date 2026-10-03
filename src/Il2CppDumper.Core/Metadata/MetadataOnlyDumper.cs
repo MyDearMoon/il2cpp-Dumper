@@ -29,12 +29,23 @@ public static class MetadataOnlyDumper
         var meta = Il2CppMetadata.ReadFrom(bytes, unityVersion);
         logger?.Invoke($"Parsed Il2CppMetadata (version: {meta.MetadataVersion})");
 
+        var arch = Architecture.Unknown;
+        var fmt = BinaryFormat.Unknown;
+        if (!string.IsNullOrEmpty(binaryPath) && File.Exists(binaryPath))
+        {
+            var id = BinaryInspector.Inspect(binaryPath);
+            arch = id.Architecture;
+            fmt = id.Format;
+        }
+
         var dumpContext = new DumpContext
         {
             MetadataVersion = meta.MetadataVersion,
             UnityVersion = unityVersion.ToString(),
-            Architecture = Architecture.Arm64,
-            Format = BinaryFormat.Elf
+            Architecture = arch != Architecture.Unknown ? arch : Architecture.Arm64,
+            Format = fmt != BinaryFormat.Unknown ? fmt : BinaryFormat.Elf,
+            AnalysisMode = AnalysisMode.MetadataOnly,
+            AddressConfidence = AddressConfidence.Unknown
         };
 
         var metaType = meta.GetType();
@@ -52,18 +63,28 @@ public static class MetadataOnlyDumper
         var paramDefs = (Il2CppParameterDefinition[]?)paramDefsField?.GetValue(meta) ?? Array.Empty<Il2CppParameterDefinition>();
         var stringLiterals = (Il2CppStringLiteral[]?)strLiteralsField?.GetValue(meta) ?? Array.Empty<Il2CppStringLiteral>();
 
-        // Collect string literals
+        // Collect string literals preserving indices and empty strings (Part 12)
         for (int i = 0; i < stringLiterals.Length; i++)
         {
             try
             {
-                var str = meta.GetStringLiteralFromIndex((uint)i);
-                if (!string.IsNullOrEmpty(str))
+                var str = meta.GetStringLiteralFromIndex((uint)i) ?? string.Empty;
+                dumpContext.StringLiterals.Add(new StringLiteralModel
                 {
-                    dumpContext.StringLiterals.Add(str);
-                }
+                    Index = i,
+                    Value = str,
+                    Length = str.Length
+                });
             }
-            catch { }
+            catch
+            {
+                dumpContext.StringLiterals.Add(new StringLiteralModel
+                {
+                    Index = i,
+                    Value = string.Empty,
+                    Length = 0
+                });
+            }
         }
 
         logger?.Invoke($"Reconstructing {images.Length} assemblies and {typeDefs.Length} types...");
@@ -101,7 +122,7 @@ public static class MetadataOnlyDumper
                     BaseTypeName = isEnum ? "System.Enum" : (isValueType ? "System.ValueType" : "System.Object")
                 };
 
-                // Fields
+                // Fields: Unknown native offset (-1)
                 int firstField = (int)td.FirstFieldIdx.Value;
                 int fieldCount = td.FieldCount;
                 for (int f = firstField; f < firstField + fieldCount && f < fieldDefs.Length; f++)
@@ -114,12 +135,13 @@ public static class MetadataOnlyDumper
                     {
                         Name = fieldName,
                         TypeName = "object",
-                        Offset = f * 8,
+                        Offset = -1,
+                        AddressConfidence = AddressConfidence.Unknown,
                         IsPublic = true
                     });
                 }
 
-                // Methods
+                // Methods: Token preserved, RVA and MethodPointer set to 0, confidence Unknown (Part 10)
                 int firstMethod = (int)td.FirstMethodIdx.Value;
                 int methodCount = td.MethodCount;
                 for (int m = firstMethod; m < firstMethod + methodCount && m < methodDefs.Length; m++)
@@ -133,8 +155,11 @@ public static class MetadataOnlyDumper
                         Name = methodName,
                         ReturnType = "void",
                         MethodIndex = m,
-                        Rva = md.token,
-                        MethodPointer = md.token,
+                        Token = md.token,
+                        Rva = 0,
+                        MethodPointer = 0,
+                        FileOffset = -1,
+                        AddressConfidence = AddressConfidence.Unknown,
                         Slot = md.slot,
                         IsPublic = (md.flags & 0x0006) == 0x0006,
                         IsPrivate = (md.flags & 0x0001) == 0x0001,
